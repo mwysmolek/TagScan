@@ -83,7 +83,7 @@ def smoke() -> int:
     prof.ocr_interval = 0.0
     settings = QSettings(str(tmp / "settings.ini"), QSettings.Format.IniFormat)
     win = MainWindow(profile=prof, catalog=cat, data_dir=str(tmp / "data"),
-                     source=FolderSource(str(photos), interval_ms=400, repeat=4), settings=settings)
+                     source=FolderSource(str(photos), interval_ms=400, repeat=4, loop=True), settings=settings)
     win.show()
     rc = {"code": 1}
 

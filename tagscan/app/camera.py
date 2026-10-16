@@ -127,7 +127,7 @@ class FolderSource(FrameSource):
     """Replays photos from a folder, one every ``interval`` ms, each repeated ``repeat`` times
     so the two-read vote can happen. For testing the engine without a camera."""
 
-    def __init__(self, folder: str, interval_ms: int = 700, repeat: int = 3, parent=None):
+    def __init__(self, folder: str, interval_ms: int = 700, repeat: int = 3, loop: bool = False, parent=None):
         super().__init__(parent)
         exts = (".jpg", ".jpeg", ".png", ".bmp")
         self.files = sorted(f for f in glob.glob(os.path.join(folder, "*")) if f.lower().endswith(exts))
@@ -135,6 +135,7 @@ class FolderSource(FrameSource):
         self.timer.setInterval(interval_ms)
         self.timer.timeout.connect(self._tick)
         self.repeat = repeat
+        self.loop = loop
         self._i = 0
         self._n = 0
         self._cur = None
@@ -157,9 +158,11 @@ class FolderSource(FrameSource):
             return
         if self._cur is None or self._n >= self.repeat:
             if self._i >= len(self.files):
-                self.timer.stop()
-                self.status.emit("photos: done")
-                return
+                if not self.loop:
+                    self.timer.stop()
+                    self.status.emit("photos: done")
+                    return
+                self._i = 0
             self._cur = cv2.imread(self.files[self._i])
             self.status.emit(f"photo {self._i + 1}/{len(self.files)}: {os.path.basename(self.files[self._i])}")
             self._i += 1
