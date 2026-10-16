@@ -23,63 +23,139 @@ from .widgets import GREEN, ORANGE, BLUE, HistoryStrip, ResultCard, VideoView
 log = logging.getLogger("tagscan")
 
 
-class ScanWorker(QThread):
-    ready = Signal(str)
-    result = Signal(object, object, object)     # observations, decision, frame
+class _FrameQueue:
+    """Latest-frame mailbox shared by a producer (GUI) and one consumer thread."""
 
-    def __init__(self, profile: Profile, catalog: Catalog, parent=None):
+    def __init__(self):
+        self.mutex = QMutex()
+        self.cond = QWaitCondition()
+        self.frame = None
+        self.force = False
+        self.stop = False
+
+    def put(self, frame, force=False):
+        self.mutex.lock()
+        self.frame = frame
+        self.force = self.force or force
+        self.cond.wakeOne()
+        self.mutex.unlock()
+
+    def take(self):
+        self.mutex.lock()
+        while self.frame is None and not self.stop:
+            self.cond.wait(self.mutex)
+        frame, force, stop = self.frame, self.force, self.stop
+        self.frame, self.force = None, False
+        self.mutex.unlock()
+        return (None, False) if stop else (frame, force)
+
+    def close(self):
+        self.mutex.lock()
+        self.stop = True
+        self.cond.wakeAll()
+        self.mutex.unlock()
+
+
+class CodeWorker(QThread):
+    """Decodes QR/barcodes on every frame it gets (a few ms each)."""
+    result = Signal(object, object, object)
+
+    def __init__(self, scanner_holder, parent=None):
         super().__init__(parent)
-        self.profile, self.catalog = profile, catalog
-        self.scanner: Scanner | None = None
-        self._mutex = QMutex()
-        self._cond = QWaitCondition()
-        self._frame = None
-        self._force = False
-        self._stop = False
+        self.holder = scanner_holder
+        self.q = _FrameQueue()
+
+    def run(self):
+        while True:
+            frame, _ = self.q.take()
+            if frame is None:
+                return
+            sc = self.holder.get("scanner")
+            if sc is None:
+                continue
+            try:
+                obs, dec = sc.process_codes(frame)
+            except Exception:
+                log.exception("code decode failed")
+                continue
+            if obs or dec.status != "none":
+                self.result.emit(obs, dec, frame)
+
+
+class OcrWorker(QThread):
+    """Owns the Scanner (RapidOCR lives here); reads printed text, throttled by the profile."""
+    ready = Signal(str)
+    result = Signal(object, object, object)
+    timing = Signal(float)
+
+    def __init__(self, profile: Profile, catalog: Catalog, holder: dict, parent=None):
+        super().__init__(parent)
+        self.profile, self.catalog, self.holder = profile, catalog, holder
+        self.q = _FrameQueue()
 
     def run(self):
         t = time.time()
-        self.scanner = Scanner(self.profile, self.catalog)
+        sc = Scanner(self.profile, self.catalog)
+        self.holder["scanner"] = sc
         try:
-            self.scanner.warmup()
-        except Exception as ex:          # the UI stays usable for codes even if OCR is broken
+            sc.warmup()
+        except Exception as ex:
             log.exception("OCR warmup failed")
             self.ready.emit(f"OCR unavailable: {ex}")
         else:
             self.ready.emit(f"engine ready ({time.time() - t:.1f}s)")
         while True:
-            self._mutex.lock()
-            while self._frame is None and not self._stop:
-                self._cond.wait(self._mutex)
-            if self._stop:
-                self._mutex.unlock()
+            frame, force = self.q.take()
+            if frame is None:
                 return
-            frame, force = self._frame, self._force
-            self._frame, self._force = None, False
-            self._mutex.unlock()
             try:
-                obs, dec, _ = self.scanner.process(frame, force_ocr=force)
+                obs, dec, ran = sc.process_text(frame, force=force)
             except Exception:
-                log.exception("scan failed")
+                log.exception("OCR failed")
                 continue
-            self.result.emit(obs, dec, frame)
+            if ran:
+                self.timing.emit(sc.stats["ocr_last"])
+                self.result.emit(obs, dec, frame)
+            else:
+                # throttled: sleep until the next slot instead of spinning on new frames
+                self.msleep(max(10, int(self.profile.ocr_interval * 1000 / 4)))
+
+
+class ScanWorker:
+    """Facade over the two threads, so the window talks to one object."""
+    def __init__(self, profile: Profile, catalog: Catalog, parent=None):
+        self.profile, self.catalog = profile, catalog
+        self.holder: dict = {}
+        self.ocr = OcrWorker(profile, catalog, self.holder, parent)
+        self.codes = CodeWorker(self.holder, parent)
+        self.ready = self.ocr.ready
+        self.timing = self.ocr.timing
+
+    @property
+    def scanner(self) -> Scanner | None:
+        return self.holder.get("scanner")
+
+    def start(self):
+        self.ocr.start()
+        self.codes.start()
+
+    def connect_result(self, slot):
+        self.ocr.result.connect(slot)
+        self.codes.result.connect(slot)
 
     def submit(self, frame, force: bool = False) -> None:
-        self._mutex.lock()
-        self._frame = frame
-        self._force = self._force or force
-        self._cond.wakeOne()
-        self._mutex.unlock()
+        self.codes.q.put(frame)
+        self.ocr.q.put(frame, force)
 
     def stop(self) -> None:
-        self._mutex.lock()
-        self._stop = True
-        self._cond.wakeAll()
-        self._mutex.unlock()
-        self.wait(3000)
+        self.codes.q.close()
+        self.ocr.q.close()
+        self.codes.wait(3000)
+        self.ocr.wait(3000)
 
     def set_catalog(self, catalog: Catalog) -> None:
         self.catalog = catalog
+        self.ocr.catalog = catalog
         if self.scanner:
             self.scanner.catalog = catalog
 
@@ -112,7 +188,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self.worker = ScanWorker(self.profile, self.catalog, self)
         self.worker.ready.connect(self._engine_ready)
-        self.worker.result.connect(self._on_result)
+        self.worker.timing.connect(self._ocr_timing)
+        self.worker.connect_result(self._on_result)
         self.worker.start()
 
         if source is not None:
@@ -190,8 +267,11 @@ class MainWindow(QMainWindow):
 
         self.setStatusBar(QStatusBar())
         self.engine_lbl = QLabel("starting engine …")
+        self.timing_lbl = QLabel("")
+        self.timing_lbl.setStyleSheet("color:#777;")
         self.count_lbl = QLabel("")
         self.statusBar().addWidget(self.engine_lbl, 1)
+        self.statusBar().addPermanentWidget(self.timing_lbl)
         self.statusBar().addPermanentWidget(self.count_lbl)
         self._refresh_history()
 
@@ -218,10 +298,12 @@ class MainWindow(QMainWindow):
         if prof:
             self.profile = prof
             self.worker.profile = prof
-            if self.worker.scanner:
-                self.worker.scanner.profile = prof
-                self.worker.scanner.parser.__init__(prof)
-                self.worker.scanner.ocr.parser = self.worker.scanner.parser
+            self.worker.ocr.profile = prof
+            sc = self.worker.scanner
+            if sc:
+                sc.profile = prof
+                sc.parser.__init__(prof)
+                sc.ocr.parser = sc.parser
         spec = self.profile.list
         if sheet:
             spec.sheet = sheet
@@ -332,6 +414,11 @@ class MainWindow(QMainWindow):
         if now - self._last_submit >= 0.04 and self.card.state == "idle":
             self._last_submit = now
             self.worker.submit(bgr)
+
+    def _ocr_timing(self, seconds: float):
+        self._ocr_times = (getattr(self, "_ocr_times", []) + [seconds])[-20:]
+        avg = sum(self._ocr_times) / len(self._ocr_times)
+        self.timing_lbl.setText(f"OCR {seconds:.2f}s (avg {avg:.2f}s)")
 
     def _engine_ready(self, msg: str):
         self.engine_lbl.setText(msg + (f" · {len(self.catalog)} items" if len(self.catalog) else " · no list loaded"))
