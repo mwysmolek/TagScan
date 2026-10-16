@@ -5,3 +5,4 @@ rapidocr-onnxruntime>=1.3,<2
 onnxruntime>=1.17
 openpyxl>=3.1
 PySide6>=6.7,<6.12    # 6.12.0 crashes at process exit in packaged apps
+pillow>=10.1

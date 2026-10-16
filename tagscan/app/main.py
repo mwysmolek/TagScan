@@ -37,29 +37,19 @@ def main(argv=None) -> int:
 
 
 def synthetic_label(path: Path, number: str, brand: str = "ACME", keyword: str = "ASSET NO.") -> None:
-    """Draw a black label with white text into a PNG (used by the smoke test and the unit tests)."""
-    from PySide6.QtGui import QImage, QPainter, QColor, QFont, QGuiApplication
-    from PySide6.QtCore import Qt, QRect
-    if QGuiApplication.instance() is None:
-        QGuiApplication(sys.argv[:1])
-    img = QImage(900, 600, QImage.Format.Format_RGB888)
-    img.fill(QColor(190, 190, 190))
-    p = QPainter(img)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setBrush(QColor(0, 0, 0))
-    p.setPen(Qt.PenStyle.NoPen)
-    p.drawRoundedRect(QRect(150, 150, 600, 300), 20, 20)
-    p.setPen(QColor(255, 255, 255))
-    f = QFont("Arial")
-    f.setBold(True)
-    f.setPixelSize(56)
-    p.setFont(f)
-    p.drawText(QRect(150, 165, 600, 80), Qt.AlignmentFlag.AlignCenter, brand)
-    p.drawText(QRect(150, 245, 600, 80), Qt.AlignmentFlag.AlignCenter, keyword)
-    f.setPixelSize(72)
-    p.setFont(f)
-    p.drawText(QRect(150, 335, 600, 100), Qt.AlignmentFlag.AlignCenter, number)
-    p.end()
+    """Draw a black label with white text into a PNG (smoke test and unit tests). Uses Pillow's
+    bundled font so the result is the same on every platform."""
+    from PIL import Image, ImageDraw, ImageFont
+    img = Image.new("RGB", (900, 600), (190, 190, 190))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle((150, 150, 750, 450), radius=20, fill=(0, 0, 0))
+    try:
+        big, small = ImageFont.load_default(size=76), ImageFont.load_default(size=56)
+    except TypeError:                       # Pillow < 10.1: no scalable default font
+        big = small = ImageFont.load_default()
+    for text, y, font in ((brand, 175, small), (keyword, 255, small), (number, 340, big)):
+        w = d.textlength(text, font=font)
+        d.text(((900 - w) / 2, y), text, fill=(255, 255, 255), font=font)
     img.save(str(path))
 
 
