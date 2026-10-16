@@ -58,7 +58,7 @@ jobs:
       - name: Build app folder
         run: python packaging/build_exe.py
 
-      - name: Smoke test (packaged app: synthetic photos -> OCR -> store -> export)
+      - name: "Smoke test (packaged app, synthetic photos through OCR, store and export)"
         shell: pwsh
         run: |
           $env:TAGSCAN_HOME = "$env:RUNNER_TEMP\tagscan"
