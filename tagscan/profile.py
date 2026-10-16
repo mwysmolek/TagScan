@@ -1,0 +1,62 @@
+"""A profile describes one family of labels and the list they are matched against.
+
+The repository ships a generic example; site-specific words (brands, keywords, sheet names)
+live in a private ``tagscan_profile.json`` next to the list file and are never committed here.
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass, field, asdict
+from pathlib import Path
+
+PROFILE_FILENAME = "tagscan_profile.json"
+
+
+@dataclass
+class ListSpec:
+    sheet: str | None = None          # xlsx sheet name (None = first sheet)
+    header_row: int = 1               # 1-based row holding the column titles
+    number_column: int = 1            # 1-based column with the inventory number
+    description_columns: list[int] = field(default_factory=lambda: [2])
+    delimiter: str | None = None      # csv/txt delimiter (None = sniff)
+
+
+@dataclass
+class Profile:
+    name: str = "example"
+    # regexes (case-insensitive) that identify the label family: a brand line ...
+    brand_patterns: list[str] = field(default_factory=lambda: [r"ACME"])
+    # ... and the keyword in front of the number, including OCR-mangled variants
+    keyword_patterns: list[str] = field(default_factory=lambda: [r"INVENT", r"ASSET", r"INV\.?\s*NO"])
+    number_digits: list[int] = field(default_factory=lambda: [4, 8])   # min, max digits
+    allow_dotted_numbers: bool = True                                  # "28.462" -> 28462
+    # applied to the text of a QR/barcode; group 1 is the number. Fallback: the number parser.
+    code_number_regex: str = r"(?:Nr|No|Number)\.?\s*:?\s*\n?\s*(\d{4,8})"
+    list: ListSpec = field(default_factory=ListSpec)
+    auto_confirm_seconds: float = 3.0
+    votes_needed: int = 2             # identical OCR reads before a text hit is accepted
+    ocr_interval: float = 0.5         # seconds between OCR passes while scanning
+    ocr_max_side: int = 960           # frames are downscaled to this before OCR
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Profile":
+        d = dict(d)
+        ls = d.pop("list", {}) or {}
+        p = cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+        p.list = ListSpec(**{k: v for k, v in ls.items() if k in ListSpec.__dataclass_fields__})
+        return p
+
+    @classmethod
+    def load(cls, path: str | Path) -> "Profile":
+        return cls.from_dict(json.loads(Path(path).read_text(encoding="utf-8")))
+
+    def save(self, path: str | Path) -> None:
+        Path(path).write_text(json.dumps(asdict(self), indent=2, ensure_ascii=False), encoding="utf-8")
+
+    @classmethod
+    def find_near(cls, list_path: str | Path | None) -> "Profile | None":
+        """The private profile that sits next to the list file, if any."""
+        if not list_path:
+            return None
+        cand = Path(list_path).parent / PROFILE_FILENAME
+        return cls.load(cand) if cand.exists() else None

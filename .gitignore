@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+.venv/
+venv/
+*.log
+.pytest_cache/
+# site-specific: never commit a real profile or list here
+tagscan_profile.json
+*.xlsx
