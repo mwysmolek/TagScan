@@ -26,6 +26,7 @@ class TextParser:
         self.dotted = re.compile(r"(?<![\d.])(\d{1,3}(?:\.\d{3})+)(?![\d.])") if profile.allow_dotted_numbers else None
         self.lo, self.hi = lo, hi
         self.code_regex = re.compile(profile.code_number_regex, re.I | re.S) if profile.code_number_regex else None
+        self.location_regex = re.compile(profile.location_code_regex, re.I | re.S) if profile.location_code_regex else None
 
     def numbers_in(self, s: str) -> list[str]:
         out = []
@@ -80,6 +81,13 @@ class TextParser:
             candidates += self.numbers_in(ln)
         level = "none" if not number else ("high" if (brand or keyword) else "low")
         return Parsed(number=number, level=level, keyword=keyword, brand=brand, candidates=candidates)
+
+    def parse_location(self, text: str) -> str:
+        """The location named by a QR/barcode payload such as ``LOC: Hall 3``, else ""."""
+        if not self.location_regex or not text or not text.strip():
+            return ""
+        m = self.location_regex.search(text.strip())
+        return m.group(1).strip() if m else ""
 
     def parse_code(self, text: str) -> str:
         """Inventory number from a QR/barcode payload."""

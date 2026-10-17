@@ -1,6 +1,7 @@
-"""Printed-text reading with RapidOCR, trying the four orientations and keeping the best."""
+"""Printed-text reading with RapidOCR, trying the profile's orientations and keeping the best."""
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -25,24 +26,38 @@ class TextHit:
         return bool(self.number)
 
 
+def default_threads() -> int:
+    """ONNX intra-op threads: half the logical CPUs, 1..4. Leaves room for the camera, the code
+    decoder and the GUI on a fanless tablet; all cores would just throttle."""
+    return max(1, min(4, (os.cpu_count() or 2) // 2))
+
+
 class TextOCR:
-    def __init__(self, parser: TextParser, max_side: int = 960):
+    def __init__(self, parser: TextParser, max_side: int = 960, rotations=(0, 90), threads: int = 0):
         self.parser = parser
         self.max_side = max_side
+        self.rotations = tuple(rotations)       # degrees
+        self.threads = threads
         self._ocr = None
 
     def _engine(self):
         if self._ocr is None:
             from rapidocr_onnxruntime import RapidOCR
-            self._ocr = RapidOCR()
+            n = self.threads if self.threads > 0 else default_threads()
+            try:
+                self._ocr = RapidOCR(intra_op_num_threads=n, inter_op_num_threads=1)
+            except Exception:           # an older/newer rapidocr without these kwargs
+                self._ocr = RapidOCR()
         return self._ocr
 
     def warmup(self) -> None:
         self.read(np.full((64, 256, 3), 255, np.uint8), stop_in_list=None)
 
-    def read(self, bgr: np.ndarray, stop_in_list=None, rotations=(0, 1, 2, 3)) -> TextHit:
-        """OCR the frame. Tries 0/90/180/270 degrees, stops early at a confident read
-        (``stop_in_list`` is a callable number -> bool, e.g. the catalog's __contains__)."""
+    def read(self, bgr: np.ndarray, stop_in_list=None, rotations=None) -> TextHit:
+        """OCR the frame. Tries each rotation (degrees, default from the profile), stops early at
+        a confident read (``stop_in_list`` is a callable number -> bool, e.g. the catalog's
+        __contains__). RapidOCR's angle classifier flips upside-down lines itself, so 0 and 90
+        already cover labels in all four orientations."""
         t0 = time.time()
         h, w = bgr.shape[:2]
         s = min(1.0, self.max_side / max(h, w))
@@ -51,8 +66,9 @@ class TextOCR:
         best = TextHit()
         best_score = (-1,)
         passes = 0
-        for k in rotations:
-            img = np.rot90(small, k) if k else small
+        for deg in (self.rotations if rotations is None else rotations):
+            k = (int(deg) // 90) % 4
+            img = np.ascontiguousarray(np.rot90(small, k)) if k else small
             res, _ = engine(img)
             passes += 1
             if not res:
