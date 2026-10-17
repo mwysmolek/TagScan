@@ -28,16 +28,19 @@ log = logging.getLogger("tagscan")
 
 PREVIEW_MAX = 1024          # the preview is never painted larger than this (or the view) on a side
 ZOOM_MIN, ZOOM_MAX = 1.0, 3.0
-FULL_CODES_INTERVAL = 0.5   # with the aim box active, the whole frame is still scanned for codes this often
+FULL_CODES_INTERVAL = 0.35  # with the aim box active, the whole frame is still scanned for codes this often
 WHITE = QColor(255, 255, 255, 220)
 
 
 @dataclass
 class Job:
-    """What a decoder works on: a frame or the aim box crop, with its position in the frame."""
+    """What a decoder works on: a frame or the aim box crop, with its position in the frame.
+    A crop job carries the whole frame too (``full``), so the code decoder can scan it for a
+    code outside the box on its own cadence without competing for the mailbox."""
     bgr: np.ndarray
     origin: tuple = (0, 0)
     box: "Box | None" = None
+    full: "np.ndarray | None" = None
 
 
 class _FrameQueue:
@@ -74,13 +77,15 @@ class _FrameQueue:
 
 
 class CodeWorker(QThread):
-    """Decodes QR/barcodes on the frames it gets (tens of ms each on a tablet)."""
+    """Decodes QR/barcodes on the jobs it gets (tens of ms each on a tablet). A crop job that
+    yields nothing is followed, every ``FULL_CODES_INTERVAL``, by a scan of the whole frame."""
     result = Signal(object, object, object)
 
     def __init__(self, scanner_holder, parent=None):
         super().__init__(parent)
         self.holder = scanner_holder
         self.q = _FrameQueue()
+        self._last_full = 0.0
 
     def run(self):
         while True:
@@ -92,11 +97,17 @@ class CodeWorker(QThread):
                 continue
             try:
                 obs, dec = sc.process_codes(job.bgr)
+                if obs or dec.status != "none":
+                    self.result.emit(obs, dec, job)
+                    continue
+                now = time.perf_counter()
+                if job.full is not None and now - self._last_full >= FULL_CODES_INTERVAL:
+                    self._last_full = now
+                    obs, dec = sc.process_codes(job.full)
+                    if obs or dec.status != "none":
+                        self.result.emit(obs, dec, Job(job.full))
             except Exception:
                 log.exception("code decode failed")
-                continue
-            if obs or dec.status != "none":
-                self.result.emit(obs, dec, job)
 
 
 class OcrWorker(QThread):
@@ -228,7 +239,6 @@ class MainWindow(QMainWindow):
         self._box_fail = 0              # empty OCR passes on the current steady box content
         self._need_change = False       # after a decision: wait until something new is in the box
         self._last_box_ocr = 0.0
-        self._last_full_codes = 0.0
         self._ctx: dict = {}            # what the pending card was read from (for the training record)
 
         self._build_ui()
@@ -547,14 +557,14 @@ class MainWindow(QMainWindow):
         st = self._stab.update(crop)
         if st.changed and self._need_change:
             self._need_change, self._box_fail = False, 0
-        if self.card.state != "idle":
+        if self.card.state not in ("idle", "input"):
             return
         now = time.perf_counter()
-        if now - self._last_full_codes >= FULL_CODES_INTERVAL:
-            self._last_full_codes = now
-            self.worker.submit_codes(Job(bgr), force=True)         # a QR anywhere in the picture
-        else:
-            self.worker.submit_codes(Job(crop, origin, box))
+        # codes: the crop at full resolution, and (inside the worker) the whole frame now and then;
+        # they keep running on the "type it" screen so a code can resolve a failed text read
+        self.worker.submit_codes(Job(crop, origin, box, full=bgr))
+        if self.card.state != "idle":
+            return
         if st.ready and not self._need_change and now - self._last_box_ocr >= self.profile.ocr_interval:
             self._last_box_ocr = now
             self._stab.mark_read()
@@ -630,6 +640,10 @@ class MainWindow(QMainWindow):
         if dec.status == "location":
             self.set_location(dec.observation.text, source="code")
             return
+        if (self.card.state == "input" and dec.status in ("accept", "review")
+                and dec.observation is not None and dec.observation.source in ("QR", "BARCODE")):
+            self.card.set_idle()            # a code resolves what the text read could not
+            self._ctx = {}
         if self.card.state != "idle":
             return
         from_box = job.box is not None

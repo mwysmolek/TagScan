@@ -54,6 +54,20 @@ def _textless_frame(w=1920, h=1440, seed=3):
     return frame
 
 
+def _qr_frame(text, base, size=260):
+    """``base`` with a QR code in the top-left corner, well outside the aim box."""
+    import cv2
+    import zxingcpp
+    if hasattr(zxingcpp, "create_barcode"):
+        img = np.array(zxingcpp.write_barcode_to_image(zxingcpp.create_barcode(text, zxingcpp.BarcodeFormat.QRCode), scale=6))
+    else:
+        img = np.array(zxingcpp.write_barcode(zxingcpp.BarcodeFormat.QRCode, text, width=size, height=size))
+    img = cv2.resize(img, (size, size), interpolation=cv2.INTER_NEAREST)
+    frame = base.copy()
+    frame[40:40 + size, 40:40 + size] = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    return frame
+
+
 @pytest.fixture(scope="module")
 def app():
     return QApplication.instance() or QApplication([])
@@ -94,8 +108,32 @@ def test_box_flow_accept_unreadable_undo(app, tmp_path):
     assert win.card.state == "idle"
     assert win.store.db.execute("SELECT outcome FROM reads ORDER BY id DESC LIMIT 1").fetchone()[0] == "back"
 
+    # 2b. the type-it screen again, then the operator aims at a QR *outside* the box: the
+    #     whole-frame code scan resolves it and dismisses the screen
+    blank2 = _textless_frame(seed=5)
+    assert _pump(lambda: win.card.state == "input", 40, step=lambda: win._on_frame(blank2)), win.card.head.text()
+    qr_frame = _qr_frame("234567", blank2)
+    assert _pump(lambda: win.card.state == "accept", 20, step=lambda: win._on_frame(qr_frame)), win.card.head.text()
+    assert win.card.pending["number"] == "234567" and win.card.pending["source"] == "QR"
+    win.card._ok("confirmed")
+    QCoreApplication.processEvents()
+    scan = win.store.recent(1)[0]
+    assert scan.number == "234567" and scan.source == "QR"
+    row = win.store.db.execute("SELECT outcome, source, crop FROM reads ORDER BY id DESC LIMIT 1").fetchone()
+    assert row[0] == "confirmed" and row[1] == "QR" and row[2] == ""      # whole-frame hit: no crop
+    win.worker.scanner.suppress("234567", 0.0)                           # forget it for step 3
+
     # 3. another label: accept, Undo -> type-it with the wrong read shown, retype the right number
     frame2 = _label_frame("234567")
+    assert _pump(lambda: win.card.state == "review", 40, step=lambda: win._on_frame(frame2)), win.card.head.text()
+    assert win.card.pending["number"] == "234567" and "already scanned" in win.card.head.text()
+    win.card._skip()                                             # Skip: stays unrecorded as a scan
+    QCoreApplication.processEvents()
+    win.store.db.execute("DELETE FROM scans WHERE number='234567'")
+    win.store.db.commit()
+    win.worker.scanner.suppress("234567", 0.0)
+    win._need_change = False
+    win._stab.reset()
     assert _pump(lambda: win.card.state == "accept", 40, step=lambda: win._on_frame(frame2)), win.card.head.text()
     assert win.card.pending["number"] == "234567"
     win.card._undo()
@@ -110,7 +148,7 @@ def test_box_flow_accept_unreadable_undo(app, tmp_path):
     assert scan.number == "123456" and scan.source == "MANUAL" and scan.note == "undo"
     row = win.store.db.execute("SELECT outcome, ocr_number, final_number, crop FROM reads ORDER BY id DESC LIMIT 1").fetchone()
     assert row[0] == "typed" and row[1] == "234567" and row[2] == "123456" and row[3]
-    assert win.store.read_counts() == {"accepted": 1, "back": 1, "undone": 1, "typed": 1}
+    assert win.store.read_counts() == {"accepted": 1, "back": 1, "confirmed": 1, "skipped": 1, "undone": 1, "typed": 1}
 
     # 4. a tap on the picture moves the box there
     win.view.set_frame(__import__("tagscan.app.camera", fromlist=["bgr_to_qimage"]).bgr_to_qimage(frame2[::4, ::4]), 1920, 1440)
