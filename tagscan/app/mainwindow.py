@@ -4,12 +4,13 @@ from __future__ import annotations
 import logging
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import cv2
 import numpy as np
 from PySide6.QtCore import Qt, QThread, Signal, QMutex, QWaitCondition, QSettings, QStandardPaths, QTimer
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QColor, QKeySequence
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
                                QSizePolicy, QToolBar, QVBoxLayout, QWidget, QStatusBar)
 
@@ -18,6 +19,7 @@ from ..catalog import Catalog
 from ..engine import Scanner
 from ..profile import Profile
 from ..store import Store
+from .aim import Box, Stability, box_rect, crop_box
 from .camera import CameraSource, FolderSource, bgr_to_qimage
 from .sysinfo import rss_mb
 from .widgets import GREEN, ORANGE, BLUE, HistoryStrip, LocationPicker, ResultCard, VideoView, TOUCH
@@ -26,6 +28,16 @@ log = logging.getLogger("tagscan")
 
 PREVIEW_MAX = 1024          # the preview is never painted larger than this (or the view) on a side
 ZOOM_MIN, ZOOM_MAX = 1.0, 3.0
+FULL_CODES_INTERVAL = 0.5   # with the aim box active, the whole frame is still scanned for codes this often
+WHITE = QColor(255, 255, 255, 220)
+
+
+@dataclass
+class Job:
+    """What a decoder works on: a frame or the aim box crop, with its position in the frame."""
+    bgr: np.ndarray
+    origin: tuple = (0, 0)
+    box: "Box | None" = None
 
 
 class _FrameQueue:
@@ -72,19 +84,19 @@ class CodeWorker(QThread):
 
     def run(self):
         while True:
-            frame, _ = self.q.take()
-            if frame is None:
+            job, _ = self.q.take()
+            if job is None:
                 return
             sc = self.holder.get("scanner")
             if sc is None:
                 continue
             try:
-                obs, dec = sc.process_codes(frame)
+                obs, dec = sc.process_codes(job.bgr)
             except Exception:
                 log.exception("code decode failed")
                 continue
             if obs or dec.status != "none":
-                self.result.emit(obs, dec, frame)
+                self.result.emit(obs, dec, job)
 
 
 class OcrWorker(QThread):
@@ -110,17 +122,17 @@ class OcrWorker(QThread):
         else:
             self.ready.emit(f"engine ready ({time.time() - t:.1f}s)")
         while True:
-            frame, force = self.q.take()
-            if frame is None:
+            job, force = self.q.take()
+            if job is None:
                 return
             try:
-                obs, dec, ran = sc.process_text(frame, force=force)
+                obs, dec, ran = sc.process_text(job.bgr, force=force)
             except Exception:
                 log.exception("OCR failed")
                 continue
             if ran:
                 self.timing.emit(sc.stats["ocr_last"])
-                self.result.emit(obs, dec, frame)
+                self.result.emit(obs, dec, job)
             else:
                 # throttled: sleep until the next slot instead of spinning on new frames
                 self.msleep(max(10, int(self.profile.ocr_interval * 1000 / 4)))
@@ -149,14 +161,20 @@ class ScanWorker:
         self.ocr.result.connect(slot)
         self.codes.result.connect(slot)
 
-    def submit(self, frame, force: bool = False) -> None:
-        """Hand a frame to the decoders. Codes run at most every ``code_interval``; the OCR
-        thread throttles itself by ``ocr_interval``. Both mailboxes keep only the newest frame."""
+    def submit(self, job: Job, force: bool = False) -> None:
+        """Whole-frame mode: codes at most every ``code_interval``, OCR throttled by the OCR
+        thread itself (``ocr_interval``). Both mailboxes keep only the newest job."""
+        self.submit_codes(job, force)
+        self.ocr.q.put(job, force)
+
+    def submit_codes(self, job: Job, force: bool = False) -> None:
         now = time.perf_counter()
         if force or now - self._last_code >= self.profile.code_interval:
             self._last_code = now
-            self.codes.q.put(frame)
-        self.ocr.q.put(frame, force)
+            self.codes.q.put(job)
+
+    def submit_text(self, job: Job, force: bool = False) -> None:
+        self.ocr.q.put(job, force)
 
     def stop(self) -> None:
         self.codes.q.close()
@@ -200,9 +218,18 @@ class MainWindow(QMainWindow):
         self.location_text = str(self.settings.value("location", "") or "")
         self._zoom = 1.0
         self._last_frame = None
-        self._pending_frame = None
         self._frames = 0
         self._stats_ticks = 0
+        # the aim box (live camera only): the operator holds the label inside it
+        self._box_active = False
+        self._box: Box | None = None
+        self._box_center = (0.5, 0.5)
+        self._stab = Stability()
+        self._box_fail = 0              # empty OCR passes on the current steady box content
+        self._need_change = False       # after a decision: wait until something new is in the box
+        self._last_box_ocr = 0.0
+        self._last_full_codes = 0.0
+        self._ctx: dict = {}            # what the pending card was read from (for the training record)
 
         self._build_ui()
         self.worker = ScanWorker(self.profile, self.catalog, self)
@@ -280,8 +307,8 @@ class MainWindow(QMainWindow):
         self.zoom_in.clicked.connect(lambda: self._zoom_step(+0.25))
         tb2.addWidget(self.zoom_in)
         tb2.addSeparator()
-        self.read_btn = QPushButton("Read text now")
-        self.read_btn.setToolTip("Run OCR on the current picture (or tap the picture, or press Space)")
+        self.read_btn = QPushButton("Read whole picture")
+        self.read_btn.setToolTip("OCR on the whole frame, for a label that does not fit the box (Space)")
         self.read_btn.clicked.connect(self._force_ocr)
         tb2.addWidget(self.read_btn)
 
@@ -290,13 +317,14 @@ class MainWindow(QMainWindow):
         v.setContentsMargins(6, 6, 6, 6)
         h = QHBoxLayout()
         self.view = VideoView()
-        self.view.tapped.connect(self._force_ocr)
+        self.view.tapped.connect(self._tapped)
         self.view.pinched.connect(lambda f: self._set_zoom(self._zoom * f))
         self.card = ResultCard()
         self.card.lookup = self._lookup
         self.card.confirmed.connect(self._confirmed)
         self.card.skipped.connect(self._skipped)
         self.card.undone.connect(self._undone)
+        self.card.backed.connect(self._backed)
         self.card.state_changed.connect(self._card_state)
         h.addWidget(self.view, 3)
         h.addWidget(self.card, 1)
@@ -345,6 +373,9 @@ class MainWindow(QMainWindow):
         if prof:
             self.profile = prof
             self.worker.set_profile(prof)
+            self._box_active = isinstance(self.source, CameraSource) and self.profile.aim_box
+            if not self._box_active:
+                self.view.set_box(None)
         spec = self.profile.list
         if sheet:
             spec.sheet = sheet
@@ -423,6 +454,11 @@ class MainWindow(QMainWindow):
         self.source = source
         source.frame.connect(self._on_frame)
         source.status.connect(self._source_status)
+        self._box_active = isinstance(source, CameraSource) and self.profile.aim_box
+        self._stab.reset()
+        self._box_fail, self._need_change = 0, False
+        if not self._box_active:
+            self.view.set_box(None)
         self.card.set_idle()
         source.start()
 
@@ -437,11 +473,10 @@ class MainWindow(QMainWindow):
         if 0 <= idx < len(devices):
             self.camera_box.setCurrentIndex(idx)
         self.camera_box.blockSignals(False)
-        try:
-            self.camera_box.currentIndexChanged.disconnect()
-        except (TypeError, RuntimeError):
-            pass
+        if getattr(self, "_camera_box_connected", False):
+            self.camera_box.currentIndexChanged.disconnect(self._camera_changed)
         self.camera_box.currentIndexChanged.connect(self._camera_changed)
+        self._camera_box_connected = True
         self.set_source(cam)
         if devices:
             cam.select(idx)
@@ -463,6 +498,9 @@ class MainWindow(QMainWindow):
     def _card_state(self, state: str):
         if isinstance(self.source, FolderSource):
             self.source.paused = state != "idle"
+        if self._box_active:
+            color = {"accept": GREEN, "review": ORANGE, "input": ORANGE}.get(state, WHITE)
+            self.view.set_box(self._box, color)
 
     def _source_status(self, text: str):
         self.view.set_text(text)
@@ -480,16 +518,48 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ frames
     def _on_frame(self, bgr: np.ndarray):
+        self._frames += 1
+        if self._box_active:
+            self._last_frame = bgr
+            self._show_preview(bgr)
+            self._read_box(bgr)
+            return
+        # whole-frame mode (photos, or aim_box off): the zoom crops the centre of the frame
         if self._zoom > 1.01:
             h, w = bgr.shape[:2]
             cw, ch = int(w / self._zoom), int(h / self._zoom)
             x0, y0 = (w - cw) // 2, (h - ch) // 2
             bgr = np.ascontiguousarray(bgr[y0:y0 + ch, x0:x0 + cw])
         self._last_frame = bgr
-        self._frames += 1
         self._show_preview(bgr)
         if self.card.state == "idle":
-            self.worker.submit(bgr)
+            self.worker.submit(Job(bgr))
+
+    def _read_box(self, bgr: np.ndarray) -> None:
+        """Aim-box mode: codes from the box crop (and the whole frame now and then), OCR from
+        the crop only while its content is steady, sharp and new. Full resolution, no zoom."""
+        h, w = bgr.shape[:2]
+        box = box_rect(w, h, self._zoom, self.profile.box_aspect, self.profile.box_width, self._box_center)
+        if box != self._box:
+            self._box = box
+            self.view.set_box(box)
+        crop, origin = crop_box(bgr, box)
+        st = self._stab.update(crop)
+        if st.changed and self._need_change:
+            self._need_change, self._box_fail = False, 0
+        if self.card.state != "idle":
+            return
+        now = time.perf_counter()
+        if now - self._last_full_codes >= FULL_CODES_INTERVAL:
+            self._last_full_codes = now
+            self.worker.submit_codes(Job(bgr), force=True)         # a QR anywhere in the picture
+        else:
+            self.worker.submit_codes(Job(crop, origin, box))
+        if st.ready and not self._need_change and now - self._last_box_ocr >= self.profile.ocr_interval:
+            self._last_box_ocr = now
+            self._stab.mark_read()
+            self.worker.submit_text(Job(crop, origin, box), force=True)
+            self.view.set_box(box, BLUE)
 
     def _show_preview(self, bgr: np.ndarray) -> None:
         """Paint a view-sized copy: scaling 1920x1440 in QPainter on every frame is what kept
@@ -505,9 +575,24 @@ class MainWindow(QMainWindow):
         self.view.set_frame(bgr_to_qimage(small), w, h)
 
     def _force_ocr(self):
+        """Read the whole frame now (Space / the button): the fallback for a label that does not
+        fit the box, and the only text path when the box is off."""
         if self._last_frame is not None:
-            self.worker.submit(self._last_frame, force=True)
-            self.statusBar().showMessage("reading text …", 1500)
+            self.worker.submit(Job(self._last_frame), force=True)
+            self.statusBar().showMessage("reading the whole picture …", 1500)
+
+    def _tapped(self, fx: float, fy: float):
+        """A tap on the picture moves the box there and reads at once; outside the picture (or
+        without the box) it is the whole-frame read."""
+        if self._box_active and fx >= 0:
+            self._box_center = (fx, fy)
+            self._stab.reset()
+            self._box_fail, self._need_change, self._last_box_ocr = 0, False, 0.0
+            if self.card.state == "input":
+                self.card._skip()                   # Back: the operator aims again instead
+            self.statusBar().showMessage("box moved", 1200)
+        else:
+            self._force_ocr()
 
     def _ocr_timing(self, seconds: float):
         self._ocr_times = (getattr(self, "_ocr_times", []) + [seconds])[-20:]
@@ -530,7 +615,8 @@ class MainWindow(QMainWindow):
         if self._stats_ticks % 60 == 0:
             log.info("stats: %s · OCR %s", self.stats_lbl.text(), self.timing_lbl.text() or "-")
 
-    def _on_result(self, obs, dec, frame):
+    def _on_result(self, obs, dec, job: Job):
+        ox, oy = job.origin
         quads = []
         for o in obs:
             color = GREEN if o.in_list else ORANGE
@@ -538,7 +624,7 @@ class MainWindow(QMainWindow):
                 color = BLUE
             elif o.source == "OCR" and dec.status in ("none", "seen"):
                 color = BLUE
-            quads += [(q, color) for q in o.boxes]
+            quads += [([(x + ox, y + oy) for x, y in q], color) for q in o.boxes]
         if quads:
             self.view.set_quads(quads)
         if dec.status == "location":
@@ -546,14 +632,19 @@ class MainWindow(QMainWindow):
             return
         if self.card.state != "idle":
             return
+        from_box = job.box is not None
+        if from_box and self.card.state == "idle":
+            self.view.set_box(self._box, WHITE)
         if dec.status == "seen":
+            self._ctx = self._context(job, obs)
             self.card.set_seen(dec.observation.number, dec.votes)
         elif dec.status in ("accept", "review"):
+            self._box_fail = 0
             o = dec.observation
             it = self.catalog.get(o.number)
             desc = it.description if it else ""
             earlier = self.store.seen(o.number)
-            self._pending_frame = frame
+            self._ctx = self._context(job, obs)
             if dec.status == "accept" and not earlier:
                 self.card.set_accept(o.number, desc, o.source, self.profile.auto_confirm_seconds)
                 self.view.flash(GREEN)
@@ -563,32 +654,123 @@ class MainWindow(QMainWindow):
                     e = earlier[-1]
                     reason = f"already scanned {e.ts[5:16]} at {e.location or '-'}"
                 self.card.set_review(o.number, desc, o.source, o.in_list, reason,
-                                     nearest=[] if o.in_list else self.catalog.nearest(o.number, 4))
+                                     nearest=[] if o.in_list else self.catalog.nearest(o.number, 4),
+                                     image=bgr_to_qimage(job.bgr) if from_box else None)
                 self.view.flash(ORANGE)
             self.card.setFocus()
+        elif from_box and dec.message != "suppressed" and not any(o.source != "OCR" for o in obs):
+            # an OCR pass on a steady, non-empty box that produced no usable number
+            self._box_fail += 1
+            if self._box_fail >= max(1, self.profile.ocr_fail_passes):
+                self._ctx = self._context(job, obs, reason="unreadable")
+                self._enter_input("unreadable", "", job.bgr, self._suggestions(obs))
+
+    # ------------------------------------------------------------------ the "type it" screen
+    def _context(self, job: Job | None, obs, reason: str = "") -> dict:
+        """What the current card was read from: kept until the operator decides, then stored."""
+        ocr = next((o for o in obs if o.source == "OCR"), None)
+        code = next((o for o in obs if o.source in ("QR", "BARCODE")), None)
+        o = ocr or code
+        ox, oy = job.origin if job else (0, 0)
+        from_box = job is not None and job.box is not None
+        return dict(frame=self._last_frame if (from_box or job is None) else job.bgr,
+                    crop=job.bgr if from_box else None,
+                    roi=job.box.as_dict() if from_box else {},
+                    ocr_number=o.number if o else "", ocr_text=o.text if o else "", ocr_level=o.level if o else "",
+                    ocr_boxes=[[(x + ox, y + oy) for x, y in q] for q in o.boxes] if o else [],
+                    source=o.source if o else "", reason=reason)
+
+    def _suggestions(self, obs) -> list:
+        """Buttons for the "type it" screen: list items among OCR's number-like tokens first,
+        then the nearest list entries to what it read."""
+        out, seen = [], set()
+        ocr = next((o for o in obs if o.source == "OCR"), None)
+        cands = ([ocr.number] if ocr and ocr.number else []) + (list(ocr.candidates) if ocr else [])
+        for c in cands:
+            it = self.catalog.get(c)
+            if it and it.key not in seen:
+                seen.add(it.key)
+                out.append(it)
+        for c in cands:
+            for it in self.catalog.nearest(c, 4):
+                if it.key not in seen:
+                    seen.add(it.key)
+                    out.append(it)
+            if len(out) >= 4:
+                break
+        return out[:4]
+
+    def _enter_input(self, reason: str, prior: str, image_bgr, nearest) -> None:
+        self._box_fail = 0
+        self._need_change = True
+        self._stab.mark_read()
+        self.card.set_input(bgr_to_qimage(image_bgr) if image_bgr is not None else None, prior, reason, nearest)
+        self.card.setFocus()
+        self.view.flash(ORANGE, 500)
+
+    def _record(self, outcome: str, final_number: str = "", source: str = "", in_list: bool = False,
+                photo: str = "", scan_id: int | None = None) -> None:
+        ctx = self._ctx or {}
+        try:
+            self.store.add_read(outcome, final_number=final_number, source=source or ctx.get("source", ""),
+                                ocr_number=ctx.get("ocr_number", ""), ocr_text=ctx.get("ocr_text", ""),
+                                ocr_level=ctx.get("ocr_level", ""), ocr_boxes=ctx.get("ocr_boxes"),
+                                roi=ctx.get("roi"), in_list=in_list, crop=ctx.get("crop"),
+                                frame=None if photo else ctx.get("frame", self._last_frame), photo=photo,
+                                location=self.location_text, scan_id=scan_id)
+        except Exception:
+            log.exception("training record failed")
 
     # ------------------------------------------------------------------ decisions
-    def _confirmed(self, number, source, in_list, description, note):
-        frame = self._last_frame if source == "MANUAL" else self._pending_frame
+    def _confirmed(self, number, source, in_list, description, note, outcome="confirmed"):
+        ctx = self._ctx or {}
+        frame = ctx.get("frame")
+        if frame is None:
+            frame = self._last_frame
         scan = self.store.add(number, description, self.location_text, source, in_list, image=frame, note=note)
-        log.info("scan %s %s %s in_list=%s", scan.id, number, source, in_list)
+        log.info("scan %s %s %s in_list=%s outcome=%s", scan.id, number, source, in_list, outcome)
+        self._record(outcome, final_number=number, source=source, in_list=in_list, photo=scan.photo, scan_id=scan.id)
+        self._ctx = {}
+        self._need_change = True
+        self._stab.mark_read()
         self.worker.suppress(number)
         self.worker.reset()
         self._refresh_history()
         self.view.flash(GREEN if in_list else ORANGE, 500)
 
     def _skipped(self, number):
+        self._record("skipped", final_number="", source=self._ctx.get("source", "") if self._ctx else "")
+        self._ctx = {}
+        self._need_change = True
+        self._stab.mark_read()
         self.worker.suppress(number, 6.0)
         self.worker.reset()
 
     def _undone(self, number):
+        """Undo on a green card: the read was wrong. Record it, then offer the pad with the
+        box content so the right number is one entry away."""
+        ctx = self._ctx or {}
+        self._record("undone", final_number="", source=ctx.get("source", ""))
         self.worker.suppress(number, 10.0)
+        self.worker.reset()
+        image = ctx.get("crop")
+        if image is None:
+            image = ctx.get("frame")
+        self._ctx = dict(ctx, reason="undo")
+        self._enter_input("undo", number, image, self.catalog.nearest(number, 4) if number else [])
+
+    def _backed(self, prior):
+        self._record("back", final_number="", source=self._ctx.get("source", "") if self._ctx else "")
+        self._ctx = {}
+        self._need_change = True
+        self._stab.mark_read()
         self.worker.reset()
 
     def _refresh_history(self):
         self.history.set_scans(self.store.recent(10))
         n = self.store.count()
-        self.count_lbl.setText(f"{n} scans · {self.data_dir}")
+        reads = sum(self.store.read_counts().values())
+        self.count_lbl.setText(f"{n} scans · {reads} reads kept for training · {self.data_dir}")
 
     def _delete_scan(self, sid: int):
         self.store.delete(sid)

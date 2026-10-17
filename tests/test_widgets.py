@@ -50,11 +50,49 @@ def test_card_pad_visibility_and_manual_entry(app):
     for k in "1001":
         card.pad._press(k)
     card.pad._press("✓")
-    assert got == [("1001", "MANUAL", True, "Cart", "")] and card.manual.text() == ""
+    assert got == [("1001", "MANUAL", True, "Cart", "", "typed")] and card.manual.text() == ""
     # a hardware keyboard still works: digits go to the number field, Enter adds
     QTest.keyClicks(card, "4711")
     QTest.keyClick(card, Qt.Key.Key_Return)
     assert got[-1][:3] == ("4711", "MANUAL", False)
+    # outcomes: countdown -> accepted, OK -> confirmed, suggestion -> corrected
+    card.set_accept("1001", "Cart", "QR", 60.0)
+    card._remaining = 0.0
+    card._tick()
+    assert got[-1][-1] == "accepted" and card.state == "idle"
+    card.set_review("4711", "", "OCR", False, "not in list", nearest=[Item("1001", "1001", "Cart")])
+    card._ok()
+    assert got[-1][:2] == ("4711", "OCR") and got[-1][-1] == "confirmed"
+    card.set_review("4711", "", "OCR", False, "not in list", nearest=[Item("1001", "1001", "Cart")])
+    card.alts_lay.itemAt(0).widget().click()
+    assert got[-1][0] == "1001" and got[-1][-1] == "corrected"
+
+
+def test_card_input_state(app):
+    from PySide6.QtGui import QImage
+    card = ResultCard()
+    card.show()
+    got, backed = [], []
+    card.confirmed.connect(lambda *a: got.append(a))
+    card.backed.connect(lambda n: backed.append(n))
+    card.lookup = lambda n: (n == "1001", "Cart" if n == "1001" else "", [])
+    img = QImage(300, 120, QImage.Format.Format_RGB888)
+    img.fill(0xff8800)
+    card.set_input(img, prior="", reason="unreadable", nearest=[Item("1001", "1001", "Cart")])
+    assert card.state == "input" and not card.pic.isHidden() and card.skip_btn.text() == "Back" and card.ok_btn.isHidden()
+    card._ok()                                   # nothing to confirm on this screen
+    assert card.state == "input" and not got
+    card._skip()                                 # Back
+    assert backed == [""] and card.state == "idle" and card.pic.isHidden() and card.skip_btn.text() == "Skip"
+    card.set_input(None, prior="4717", reason="undo")
+    assert card.pic.isHidden() and "Wrong read" in card.head.text()
+    for k in "4711":
+        card.pad._press(k)
+    card.pad._press("✓")
+    assert got[-1] == ("4711", "MANUAL", False, "", "undo", "typed")
+    card.set_input(img, prior="", reason="unreadable", nearest=[Item("1001", "1001", "Cart")])
+    card.alts_lay.itemAt(0).widget().click()
+    assert got[-1] == ("1001", "MANUAL", True, "Cart", "unreadable", "corrected")
 
 
 def test_location_picker_choice_and_pad(app):

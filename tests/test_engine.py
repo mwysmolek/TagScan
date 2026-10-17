@@ -144,3 +144,24 @@ def test_scanner_apply_profile():
     sc.apply_profile(p2)
     assert sc.ocr.rotations == (0, 90, 180, 270) and sc.ocr.max_side == 640 and sc.formats is None
     assert sc.parser.parse("SERIAL 123456").level == "high" and sc.ocr.parser is sc.parser
+
+
+def test_store_reads(tmp_path):
+    import numpy as np
+    from tagscan.store import Store
+    st = Store(tmp_path)
+    crop = np.full((40, 90, 3), 100, np.uint8)
+    frame = np.full((120, 160, 3), 50, np.uint8)
+    rid = st.add_read("typed", final_number="4711", source="MANUAL", ocr_number="4717", ocr_text="ASSET\n4717",
+                      ocr_level="high", ocr_boxes=[[(1, 2), (3, 2), (3, 4), (1, 4)]], roi={"x": 1, "y": 2, "w": 3, "h": 4},
+                      crop=crop, frame=frame, location="Hall 2")
+    assert rid == 1
+    row = st.db.execute("SELECT outcome, final_number, ocr_number, crop, photo, roi, ocr_boxes FROM reads").fetchone()
+    assert row[0] == "typed" and row[1] == "4711" and row[2] == "4717"
+    assert (tmp_path / "training" / "crops" / row[3]).exists() and (tmp_path / row[4]).exists()
+    assert '"w": 3' in row[5] and row[6].startswith("[[[1.0, 2.0]")
+    scan = st.add("4711", "thing", "Hall 2", "QR", True, image=frame)
+    st.add_read("accepted", final_number="4711", source="QR", photo=scan.photo, frame=frame, scan_id=scan.id)
+    row = st.db.execute("SELECT photo, scan_id FROM reads WHERE id=2").fetchone()
+    assert row[0] == f"photos/{scan.photo}" and row[1] == scan.id       # no second copy of the frame
+    assert st.read_counts() == {"typed": 1, "accepted": 1}

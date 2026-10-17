@@ -48,6 +48,11 @@ class Profile:
     # a QR/barcode whose text matches this sets the scanning location instead of an item; group 1 = location
     location_code_regex: str = r"^\s*(?:LOC|ORT|LOCATION|STANDORT|RAUM|ROOM)\s*[:=]\s*(.+?)\s*$"
     camera_max_width: int = 1920      # largest camera frame width requested; more pixels cost CPU, not accuracy
+    # the aim box: the operator holds the label inside it; OCR and codes read its full-resolution crop
+    aim_box: bool = True
+    box_aspect: float = 2.3           # width / height of the box (label shape)
+    box_width: float = 0.6            # box width as a fraction of the frame at zoom 1
+    ocr_fail_passes: int = 3          # empty OCR passes on a steady box before the "type it" screen
 
     @classmethod
     def from_dict(cls, d: dict) -> "Profile":

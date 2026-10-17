@@ -24,6 +24,7 @@ class Observation:
     boxes: list = field(default_factory=list)
     elapsed: float = 0.0
     rotation: int = 0
+    candidates: list = field(default_factory=list)   # OCR: other number-like tokens in the text
 
 
 @dataclass
@@ -127,10 +128,13 @@ class Scanner:
         self.stats["ocr_last"] = hit.elapsed
         self.last_text_boxes = hit.boxes
         if not hit.ok:
-            return [], Decision(status="none"), True
+            # no number, but what was seen is still useful (the "type it" screen shows it)
+            empty = Observation(source="OCR", number="", text=hit.text, level="none", boxes=hit.boxes,
+                                elapsed=hit.elapsed, rotation=hit.rotation, candidates=hit.candidates)
+            return [empty] if hit.text else [], Decision(status="none"), True
         o = Observation(source="OCR", number=hit.number, text=hit.text, level=hit.level,
                         in_list=hit.number in self.catalog, boxes=hit.boxes,
-                        elapsed=hit.elapsed, rotation=hit.rotation)
+                        elapsed=hit.elapsed, rotation=hit.rotation, candidates=hit.candidates)
         if self._is_suppressed(o.number):
             return [o], Decision(status="none", message="suppressed"), True
         with self._lock:

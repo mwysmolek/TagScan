@@ -20,6 +20,7 @@ class TextHit:
     boxes: list = field(default_factory=list)   # list of 4-point quads in input coordinates
     elapsed: float = 0.0
     passes: int = 0
+    candidates: list = field(default_factory=list)   # every number-like token seen, best read
 
     @property
     def ok(self) -> bool:
@@ -88,7 +89,8 @@ class TextOCR:
                 boxes = [[_unrotate(x, y, k, small.shape[1], small.shape[0]) for x, y in r[0]] for r in res]
                 best = TextHit(number=parsed.number, level=parsed.level, text=text,
                                conf=float(np.mean(confs)), rotation=k * 90,
-                               boxes=[[(x / s, y / s) for x, y in q] for q in boxes])
+                               boxes=[[(x / s, y / s) for x, y in q] for q in boxes],
+                               candidates=list(dict.fromkeys(parsed.candidates)))
             if in_list and parsed.level == "high":
                 break
         best.elapsed = time.time() - t0

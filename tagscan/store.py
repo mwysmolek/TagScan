@@ -35,7 +35,15 @@ class Store:
         self.db.execute("""CREATE TABLE IF NOT EXISTS scans(
             id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, number TEXT, description TEXT,
             location TEXT, source TEXT, in_list INTEGER, photo TEXT, device TEXT, note TEXT DEFAULT '')""")
+        # every read the operator decided on, right or wrong: training data for a label detector
+        # (frame + box + text boxes) and for OCR tuning (crop + the number that was actually there)
+        self.db.execute("""CREATE TABLE IF NOT EXISTS reads(
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, outcome TEXT, source TEXT,
+            ocr_number TEXT, ocr_text TEXT, ocr_level TEXT, ocr_boxes TEXT, final_number TEXT,
+            in_list INTEGER, roi TEXT, crop TEXT, photo TEXT, location TEXT, device TEXT, scan_id INTEGER)""")
         self.db.commit()
+        (self.folder / "training" / "crops").mkdir(parents=True, exist_ok=True)
+        (self.folder / "training" / "frames").mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------ writes
     def add(self, number: str, description: str, location: str, source: str, in_list: bool,
@@ -52,6 +60,39 @@ class Store:
                               (ts, number, description, location, source, int(in_list), photo, self.device, note))
         self.db.commit()
         return Scan(cur.lastrowid, ts, number, description, location, source, in_list, photo, self.device, note)
+
+    def add_read(self, outcome: str, final_number: str = "", source: str = "", ocr_number: str = "",
+                 ocr_text: str = "", ocr_level: str = "", ocr_boxes=None, roi: dict | None = None,
+                 in_list: bool = False, crop=None, frame=None, photo: str = "", location: str = "",
+                 scan_id: int | None = None) -> int:
+        """Record one decided read. ``outcome``: accepted | confirmed | corrected | typed | undone |
+        skipped | back. ``crop`` (the box content) is saved under training/crops; the full
+        ``frame`` under training/frames unless ``photo`` already names the scan's photo."""
+        import json
+        ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        stamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        crop_name, frame_name = "", ""
+        if crop is not None and getattr(crop, "size", 0):
+            import cv2
+            crop_name = f"{stamp}.jpg"
+            cv2.imwrite(str(self.folder / "training" / "crops" / crop_name), crop, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        if photo:
+            frame_name = f"photos/{photo}"
+        elif frame is not None and getattr(frame, "size", 0):
+            import cv2
+            frame_name = f"training/frames/{stamp}.jpg"
+            cv2.imwrite(str(self.folder / frame_name), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+        boxes = json.dumps([[[round(float(x), 1), round(float(y), 1)] for x, y in q] for q in (ocr_boxes or [])])
+        cur = self.db.execute(
+            "INSERT INTO reads(ts,outcome,source,ocr_number,ocr_text,ocr_level,ocr_boxes,final_number,in_list,roi,"
+            "crop,photo,location,device,scan_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (ts, outcome, source, ocr_number, ocr_text or "", ocr_level, boxes, final_number, int(bool(in_list)),
+             json.dumps(roi or {}), crop_name, frame_name, location, self.device, scan_id))
+        self.db.commit()
+        return cur.lastrowid
+
+    def read_counts(self) -> dict[str, int]:
+        return {k: n for k, n in self.db.execute("SELECT outcome, COUNT(*) FROM reads GROUP BY outcome")}
 
     def delete(self, scan_id: int) -> None:
         row = self.db.execute("SELECT photo FROM scans WHERE id=?", (scan_id,)).fetchone()

@@ -29,9 +29,10 @@ def _remove_all(layout, keep_first: int = 0, keep_last: int = 0) -> None:
 
 
 class VideoView(QWidget):
-    """Shows the latest (already downscaled) frame, scaled to fit, with coloured quads on top.
-    A tap emits ``tapped``; a pinch emits ``pinched(scale)``."""
-    tapped = Signal()
+    """Shows the latest (already downscaled) frame, scaled to fit, with coloured quads and the
+    aim box on top. A tap emits ``tapped(fx, fy)`` with the tapped point as fractions of the
+    frame (-1, -1 outside the picture); a pinch emits ``pinched(scale)``."""
+    tapped = Signal(float, float)
     pinched = Signal(float)
 
     def __init__(self, parent=None):
@@ -50,6 +51,8 @@ class VideoView(QWidget):
         self._flash_timer.setSingleShot(True)
         self._flash_timer.timeout.connect(self._end_flash)
         self._press: QPoint | None = None
+        self._box = None                     # (x, y, w, h) in frame coordinates
+        self._box_color = QColor(255, 255, 255, 220)
         self.setStyleSheet("background:#111;")
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)
         self.grabGesture(Qt.GestureType.PinchGesture)
@@ -67,6 +70,13 @@ class VideoView(QWidget):
 
     def set_text(self, text: str) -> None:
         self._text = text
+        self.update()
+
+    def set_box(self, box, color: QColor | None = None) -> None:
+        """The aim box as an object with x, y, w, h in frame coordinates (None hides it)."""
+        self._box = (box.x, box.y, box.w, box.h) if box is not None else None
+        if color is not None:
+            self._box_color = color
         self.update()
 
     def flash(self, color: QColor, ms: int = 350) -> None:
@@ -88,8 +98,23 @@ class VideoView(QWidget):
 
     def mouseReleaseEvent(self, ev):
         if self._press is not None and (ev.position().toPoint() - self._press).manhattanLength() < 24:
-            self.tapped.emit()
+            self.tapped.emit(*self.frame_point(ev.position().x(), ev.position().y()))
         self._press = None
+
+    def _geometry(self):
+        """(scale, ox, oy, dw, dh) of the drawn picture inside the widget."""
+        sw, sh = self._src
+        s = min(self.width() / sw, self.height() / sh)
+        dw, dh = sw * s, sh * s
+        return s, (self.width() - dw) / 2, (self.height() - dh) / 2, dw, dh
+
+    def frame_point(self, wx: float, wy: float) -> tuple[float, float]:
+        """Widget point -> fractions of the frame, (-1, -1) when outside the picture."""
+        if self._img is None:
+            return -1.0, -1.0
+        s, ox, oy, dw, dh = self._geometry()
+        fx, fy = (wx - ox) / dw, (wy - oy) / dh
+        return (fx, fy) if 0 <= fx <= 1 and 0 <= fy <= 1 else (-1.0, -1.0)
 
     def event(self, ev):
         if ev.type() == QEvent.Type.Gesture:
@@ -113,13 +138,27 @@ class VideoView(QWidget):
             p.setPen(GREY)
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text or "no camera")
             return
-        sw, sh = self._src
-        s = min(self.width() / sw, self.height() / sh)
-        dw, dh = sw * s, sh * s
-        ox, oy = (self.width() - dw) / 2, (self.height() - dh) / 2
+        s, ox, oy, dw, dh = self._geometry()
         target = QRectF(ox, oy, dw, dh)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.drawImage(target, self._img)
+        if self._box is not None:
+            bx, by, bw, bh = self._box
+            r = QRectF(ox + bx * s, oy + by * s, bw * s, bh * s)
+            # dim everything outside the box, then corner brackets
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 90))
+            p.drawRect(QRectF(ox, oy, dw, r.top() - oy))
+            p.drawRect(QRectF(ox, r.bottom(), dw, oy + dh - r.bottom()))
+            p.drawRect(QRectF(ox, r.top(), r.left() - ox, r.height()))
+            p.drawRect(QRectF(r.right(), r.top(), ox + dw - r.right(), r.height()))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(self._box_color, 4))
+            arm = max(12.0, min(r.width(), r.height()) * 0.2)
+            for cx, dx in ((r.left(), 1), (r.right(), -1)):
+                for cy, dy in ((r.top(), 1), (r.bottom(), -1)):
+                    p.drawLine(QPointF(cx, cy), QPointF(cx + dx * arm, cy))
+                    p.drawLine(QPointF(cx, cy), QPointF(cx, cy + dy * arm))
         for quad, color in self._quads:
             p.setPen(QPen(color, 3))
             p.drawPolygon(QPolygonF([QPointF(ox + x * s, oy + y * s) for x, y in quad]))
@@ -189,9 +228,10 @@ class NumberPad(QWidget):
 class ResultCard(QFrame):
     """Idle -> (seen) -> accept with countdown | review with buttons -> idle.
     The number pad under the card types a number without a keyboard."""
-    confirmed = Signal(str, str, bool, str, str)   # number, source, in_list, description, note
-    skipped = Signal(str)                          # number
-    undone = Signal(str)                           # number
+    confirmed = Signal(str, str, bool, str, str, str)   # number, source, in_list, description, note, outcome
+    skipped = Signal(str)                          # number (Skip on a review card)
+    undone = Signal(str)                           # number (Undo on a green card)
+    backed = Signal(str)                           # Back on the "type it" screen (prior number)
     state_changed = Signal(str)
 
     def __init__(self, parent=None):
@@ -227,6 +267,11 @@ class ResultCard(QFrame):
         self.bar.setTextVisible(False)
         self.bar.setFixedHeight(10)
         self.bar.hide()
+        self.pic = QLabel()                      # the box content, so the operator can read it
+        self.pic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.pic.setStyleSheet("background:#222;border-radius:6px;")
+        self.pic.setMinimumHeight(120)
+        self.pic.hide()
 
         self.alts = QWidget()
         self.alts_lay = QGridLayout(self.alts)
@@ -266,6 +311,7 @@ class ResultCard(QFrame):
         lay.addWidget(self.desc)
         lay.addWidget(self.meta)
         lay.addWidget(self.bar)
+        lay.addWidget(self.pic)
         lay.addWidget(self.alts)
         lay.addStretch(1)
         lay.addLayout(btns)
@@ -291,9 +337,12 @@ class ResultCard(QFrame):
         self.desc.setText("")
         self.meta.setText("")
         self.bar.hide()
+        self.pic.hide()
+        self.pic.clear()
         self._clear_alts()
         self.ok_btn.hide()
         self.skip_btn.hide()
+        self.skip_btn.setText("Skip")
         self.undo_btn.hide()
         self.pad.show()
         self.setStyleSheet("QFrame#card{background:#fafafa;border:1px solid #ddd;border-radius:10px;}")
@@ -315,6 +364,7 @@ class ResultCard(QFrame):
         self.desc.setText(description)
         self.meta.setText(note)
         self._clear_alts()
+        self.pic.hide()
         self.bar.show()
         self._seconds = max(0.05, seconds)
         self._remaining = self._seconds
@@ -326,7 +376,7 @@ class ResultCard(QFrame):
         self.setStyleSheet("QFrame#card{background:#e9f7ec;border:2px solid #2ea043;border-radius:10px;}")
         self._timer.start()
 
-    def set_review(self, number, description, source, in_list, reason, nearest=()):
+    def set_review(self, number, description, source, in_list, reason, nearest=(), image=None):
         self.state = "review"
         self.state_changed.emit("review")
         self.pending = dict(number=number, description=description, source=source, in_list=in_list, note=reason)
@@ -337,6 +387,54 @@ class ResultCard(QFrame):
         self.meta.setText("tap a suggestion, OK to keep as read, or type the number")
         self.bar.hide()
         self._timer.stop()
+        self._show_pic(image)
+        self._set_alts(nearest)
+        self.ok_btn.show()
+        self.skip_btn.show()
+        self.skip_btn.setText("Skip")
+        self.undo_btn.hide()
+        self.pad.show()
+        self.setStyleSheet("QFrame#card{background:#fff4e5;border:2px solid #f08c00;border-radius:10px;}")
+
+    def set_input(self, image, prior: str = "", reason: str = "unreadable", nearest=()):
+        """The "type it" screen: OCR gave up on a steady box, or the operator undid a read.
+        Shows the box content, suggestions, and the pad; Back returns to idle."""
+        self.state = "input"
+        self.state_changed.emit("input")
+        self.pending = dict(number=prior, description="", source="MANUAL", in_list=False, note=reason)
+        if reason == "undo":
+            self.head.setText("Wrong read  ·  type the right number")
+        else:
+            self.head.setText("Could not read the label  ·  type the number")
+        self.number.setText(prior or "")
+        self.number.setStyleSheet("font-size:44px;font-weight:700;color:#999;")
+        self.desc.setText("")
+        self.meta.setText("tap a suggestion or type the number on the pad; Back if there is nothing to add")
+        self.bar.hide()
+        self._timer.stop()
+        self._show_pic(image)
+        self._set_alts(nearest)
+        self.ok_btn.hide()
+        self.skip_btn.setText("Back")
+        self.skip_btn.show()
+        self.undo_btn.hide()
+        self.pad.show()
+        self.manual.setFocus()
+        self.setStyleSheet("QFrame#card{background:#eef3fb;border:2px solid #3c8ce6;border-radius:10px;}")
+
+    def _show_pic(self, image) -> None:
+        if image is None or image.isNull():
+            self.pic.hide()
+            self.pic.clear()
+            return
+        from PySide6.QtGui import QPixmap
+        w = max(200, self.width() - 40)
+        pm = QPixmap.fromImage(image).scaled(w, 220, Qt.AspectRatioMode.KeepAspectRatio,
+                                             Qt.TransformationMode.SmoothTransformation)
+        self.pic.setPixmap(pm)
+        self.pic.show()
+
+    def _set_alts(self, nearest) -> None:
         self._clear_alts()
         for i, it in enumerate(list(nearest)[:4]):
             b = QPushButton(f"{it.number}\n{it.description[:34]}")
@@ -344,11 +442,6 @@ class ResultCard(QFrame):
             b.setStyleSheet("text-align:left;font-size:13px;border-radius:6px;")
             b.clicked.connect(lambda _=False, it=it: self._choose(it))
             self.alts_lay.addWidget(b, i // 2, i % 2)
-        self.ok_btn.show()
-        self.skip_btn.show()
-        self.undo_btn.hide()
-        self.pad.show()
-        self.setStyleSheet("QFrame#card{background:#fff4e5;border:2px solid #f08c00;border-radius:10px;}")
 
     # ------------------------------------------------------------------ actions
     def _tick(self):
@@ -356,19 +449,21 @@ class ResultCard(QFrame):
         self.bar.setValue(int(max(0.0, self._remaining / self._seconds) * 1000))
         if self._remaining <= 0:
             self._timer.stop()
-            self._ok()
+            self._ok("accepted")
 
-    def _ok(self):
-        if not self.pending:
+    def _ok(self, outcome: str = ""):
+        if not self.pending or self.state == "input":
             return
         p = self.pending
+        outcome = outcome or ("accepted" if self.state == "accept" else "confirmed")
         self.set_idle()
-        self.confirmed.emit(p["number"], p["source"], p["in_list"], p["description"], p.get("note", ""))
+        self.confirmed.emit(p["number"], p["source"], p["in_list"], p["description"], p.get("note", ""), outcome)
 
     def _skip(self):
         n = self.pending["number"] if self.pending else ""
+        was_input = self.state == "input"
         self.set_idle()
-        self.skipped.emit(n)
+        (self.backed if was_input else self.skipped).emit(n)
 
     def _undo(self):
         n = self.pending["number"] if self.pending else ""
@@ -378,8 +473,12 @@ class ResultCard(QFrame):
     def _choose(self, it):
         if not self.pending:
             return
-        self.pending.update(number=it.key, description=it.description, in_list=True, note="corrected")
-        self._ok()
+        note = self.pending.get("note", "") if self.state == "input" else "corrected"
+        self.pending.update(number=it.key, description=it.description, in_list=True, note=note, source="MANUAL"
+                            if self.state == "input" else self.pending["source"])
+        p = self.pending
+        self.set_idle()
+        self.confirmed.emit(p["number"], p["source"], p["in_list"], p["description"], p["note"], "corrected")
 
     def _manual(self):
         text = self.manual.text().strip()
@@ -389,8 +488,9 @@ class ResultCard(QFrame):
         in_list, description = False, ""
         if self.lookup:
             in_list, description, _ = self.lookup(text)
+        note = self.pending.get("note", "") if (self.pending and self.state == "input") else ""
         self.set_idle()
-        self.confirmed.emit(text, "MANUAL", in_list, description, "")
+        self.confirmed.emit(text, "MANUAL", in_list, description, note, "typed")
 
     def _clear_alts(self):
         _remove_all(self.alts_lay)
@@ -398,12 +498,12 @@ class ResultCard(QFrame):
     def keyPressEvent(self, ev):
         key, text = ev.key(), ev.text()
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self.state in ("accept", "review"):
-            self._ok()
+            self._ok("confirmed")
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self.manual.text().strip():
             self._manual()
         elif key == Qt.Key.Key_Escape and self.state == "accept":
             self._undo()
-        elif key == Qt.Key.Key_Escape and self.state == "review":
+        elif key == Qt.Key.Key_Escape and self.state in ("review", "input"):
             self._skip()
         elif text.isdigit():                          # a hardware keyboard types into the number field
             self.manual.insert(text)
