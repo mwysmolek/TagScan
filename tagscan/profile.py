@@ -48,8 +48,11 @@ class Profile:
     # a QR/barcode whose text matches this sets the scanning location instead of an item; group 1 = location
     location_code_regex: str = r"^\s*(?:LOC|ORT|LOCATION|STANDORT|RAUM|ROOM)\s*[:=]\s*(.+?)\s*$"
     camera_max_width: int = 1920      # largest camera frame width requested; more pixels cost CPU, not accuracy
-    # who is scanning: names offered by the Operator picker, and the badge code that sets one (``OP: Anna``)
+    # who is scanning: the person types a short code (e.g. 123ab) on the pad. ``operator_pattern``
+    # (regex, optional) rejects typos; ``operators`` lists codes/names offered as buttons; a badge
+    # code ``OP: <code>`` sets it hands-free (``operator_code_regex``)
     operators: list[str] = field(default_factory=lambda: [])   # (not default_factory=list: the field named 'list' shadows it here)
+    operator_pattern: str = ""
     operator_code_regex: str = r"^\s*(?:OP|OPERATOR|USER|PERSON|MITARBEITER|NAME)\s*[:=]\s*(.+?)\s*$"
     # the aim box: the operator holds the label inside it; OCR and codes read its full-resolution crop
     aim_box: bool = True

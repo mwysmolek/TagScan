@@ -109,10 +109,24 @@ def test_location_picker_choice_and_pad(app):
     assert dlg.exec() == dlg.DialogCode.Accepted and dlg.value() == "204"
 
 
-def test_operator_picker(app):
-    dlg = OperatorPicker(None, "", choices=["Anna", "Ben"], recent=["Ben"])
-    assert dlg.windowTitle() == "Operator"
-    buttons = [b for b in dlg.findChildren(type(dlg.pad._key("x", 1))) if b.text() in ("Anna", "Ben")]
-    assert [b.text() for b in buttons] == ["Ben", "Anna"]
-    QTimer.singleShot(0, lambda: buttons[1].click())
-    assert dlg.exec() == dlg.DialogCode.Accepted and dlg.value() == "Anna"
+def test_operator_picker_alnum_pad_and_pattern(app):
+    dlg = OperatorPicker(None, "", recent=["123ab"], pattern=r"\d{3}[a-z]{2}")
+    assert dlg.windowTitle() == "Operator" and not dlg.ok.isEnabled()
+    for k in ("4", "5", "6", "c", "d"):                   # digits and letters on the one pad
+        dlg.pad._press(k)
+    assert dlg.edit.text() == "456cd" and dlg.ok.isEnabled() and dlg.valid()
+    dlg.pad._press("⌫")
+    assert dlg.edit.text() == "456c" and not dlg.ok.isEnabled() and "valid" in dlg.hint.text()
+    dlg.accept()                                          # refused while invalid
+    assert dlg.result() != dlg.DialogCode.Accepted
+    dlg.pad._press("d")
+    QTimer.singleShot(0, lambda: dlg.pad._press("✓"))
+    assert dlg.exec() == dlg.DialogCode.Accepted and dlg.value() == "456cd"
+    # a recent code is one tap
+    dlg = OperatorPicker(None, "", recent=["123ab"], pattern="")
+    buttons = [b for b in dlg.findChildren(type(dlg.pad._key("x", 1))) if b.text() == "123ab"]
+    QTimer.singleShot(0, lambda: buttons[0].click())
+    assert dlg.exec() == dlg.DialogCode.Accepted and dlg.value() == "123ab"
+    # without a pattern anything non-empty goes
+    dlg = OperatorPicker(None, "x1")
+    assert dlg.ok.isEnabled() and dlg.valid()

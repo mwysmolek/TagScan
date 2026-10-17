@@ -27,10 +27,11 @@ Everything works with a finger; a keyboard is never required.
    what your labels look like (brand words, keyword in front of the number, how many
    digits, which columns hold number, description and location). Without one a generic
    profile is used.
-2. **Operator:** tap the operator button and pick your name (profile `operators`), a recent
-   one, or type a staff number on the pad. Or scan your **badge code**: a QR code reading
-   `OP: Anna` sets it (blue flash). The card nags until someone is set; every scan records
-   who made it.
+2. **Operator:** tap the operator button and type your code (`123ab` or whatever your site
+   uses) on the digits-and-letters pad; recent codes are one tap. The profile can hold a
+   pattern (`operator_pattern`, e.g. `\d{3}[a-z]{2}`) so a typo is refused on the spot, and
+   optionally a list of codes offered as buttons. A badge QR code reading `OP: <code>` also
+   works. The card nags until someone is set; every scan records who made it.
 3. **Location:** tap the location button and pick one: recent locations, every location
    named in the list (profile `list.location_column`), or a number pad for room numbers.
    Or skip the screen entirely and scan a **location code**: a QR code reading `LOC: Hall 3`

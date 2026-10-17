@@ -174,37 +174,52 @@ class VideoView(QWidget):
             p.drawText(QRectF(ox + 8, oy + dh - 28, dw - 16, 28), Qt.AlignmentFlag.AlignVCenter, self._text)
 
 
+ALNUM_ROWS = (("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
+              ("q", "w", "e", "r", "t", "z", "u", "i", "o", "p"),
+              ("a", "s", "d", "f", "g", "h", "j", "k", "l", "clear"),
+              ("y", "x", "c", "v", "b", "n", "m", "-", "⌫", "✓"))
+
+
 class NumberPad(QWidget):
-    """Digits, backspace and enter as finger-sized buttons that edit an attached QLineEdit.
-    ``entered`` fires on the tick key. Extra keys (e.g. "-", " ") can be added for locations."""
+    """Finger-sized keys that edit an attached QLineEdit. Default: a 3x4 number pad with
+    backspace and enter; ``extra`` adds a row (e.g. "-", " "); ``rows`` replaces the layout
+    altogether (see ``ALNUM_ROWS`` for digits plus a QWERTZ letter block, for codes such as
+    ``123ab``). ``entered`` fires on the tick key."""
     entered = Signal()
 
-    def __init__(self, parent=None, extra: tuple[str, ...] = (), height: int = TOUCH):
+    def __init__(self, parent=None, extra: tuple[str, ...] = (), height: int = TOUCH, rows=None):
         super().__init__(parent)
         self.target: QLineEdit | None = None
         g = QGridLayout(self)
         g.setContentsMargins(0, 0, 0, 0)
         g.setSpacing(6)
-        keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "⌫", "0", "✓"]
-        for i, k in enumerate(keys):
-            g.addWidget(self._key(k, height), i // 3, i % 3)
-        if extra:
-            row = QHBoxLayout()
-            row.setSpacing(6)
-            for k in extra:
-                row.addWidget(self._key(k, height))
-            g.addLayout(row, 4, 0, 1, 3)
+        if rows is None:
+            rows = (("1", "2", "3"), ("4", "5", "6"), ("7", "8", "9"), ("⌫", "0", "✓"))
+            if extra:
+                rows = rows + (tuple(extra),)
+        ncol = max(len(r) for r in rows)
+        for r, keys in enumerate(rows):
+            if len(keys) == ncol:
+                for c, k in enumerate(keys):
+                    g.addWidget(self._key(k, height), r, c)
+            else:                                   # a shorter row spans the full width
+                row = QHBoxLayout()
+                row.setSpacing(6)
+                for k in keys:
+                    row.addWidget(self._key(k, height))
+                g.addLayout(row, r, 0, 1, ncol)
 
     def _key(self, k: str, height: int) -> QPushButton:
         label = {" ": "space", "⌫": "⌫", "✓": "✓"}.get(k, k)
         b = QPushButton(label)
         b.setMinimumHeight(height)
+        b.setMinimumWidth(height)
         b.setFocusPolicy(Qt.FocusPolicy.NoFocus)          # never steal the keyboard focus
-        style = "font-size:20px;border-radius:8px;"
+        style = "font-size:20px;border-radius:8px;padding:0 4px;"
         if k == "✓":
             style += "background:#2ea043;color:white;font-weight:600;"
-        elif k == "⌫":
-            style += "background:#eee;"
+        elif k in ("⌫", "clear"):
+            style += "background:#eee;font-size:16px;"
         b.setStyleSheet(style)
         b.clicked.connect(lambda _=False, k=k: self._press(k))
         return b
@@ -618,16 +633,98 @@ class LocationPicker(TextPicker):
     """The location picker (TextPicker with its default texts)."""
 
 
-class OperatorPicker(TextPicker):
-    """Who is scanning: names from the profile, recent ones, or a staff number on the pad."""
+class OperatorPicker(QDialog):
+    """Who is scanning: the person types their own short code (e.g. ``123ab``) on a
+    digits-and-letters pad. Recent codes and any names from the profile are one tap. An
+    optional ``pattern`` (regex from the profile) keeps typos out."""
 
-    def __init__(self, parent=None, current: str = "", choices=(), recent=()):
-        super().__init__(parent, current, choices, recent, title="Operator", tap_hint="Tap your name",
-                         placeholder="name or staff number",
-                         code_hint="Or scan your badge: a QR code reading  OP: <name>  sets the operator "
-                                   "without touching the screen.",
-                         empty_hint="No names yet. Type one on the right, or list them in the profile\n"
-                                    "(\"operators\": [...]) to see them here.")
+    def __init__(self, parent=None, current: str = "", choices=(), recent=(), pattern: str = ""):
+        super().__init__(parent)
+        import re
+        self.setWindowTitle("Operator")
+        self.setModal(True)
+        self.resize(640, 560)
+        self._rx = re.compile(pattern, re.I) if pattern else None
+        v = QVBoxLayout(self)
+        v.setSpacing(10)
+        title = QLabel("Who is scanning?  Enter your code")
+        title.setStyleSheet("font-size:16px;color:#555;")
+        v.addWidget(title)
+        self.edit = QLineEdit(current)
+        self.edit.setPlaceholderText("your code, e.g. 123ab")
+        self.edit.setMinimumHeight(60)
+        self.edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.edit.setStyleSheet("font-size:28px;letter-spacing:2px;")
+        v.addWidget(self.edit)
+        seen: list[str] = []
+        for r in list(recent) + list(choices):
+            r = str(r).strip()
+            if r and r not in seen:
+                seen.append(r)
+        if seen:
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            lbl = QLabel("recent:")
+            lbl.setStyleSheet("color:#777;")
+            row.addWidget(lbl)
+            for name in seen[:6]:
+                b = QPushButton(name)
+                b.setMinimumHeight(TOUCH)
+                b.setStyleSheet("font-size:16px;border-radius:8px;border:2px solid #3c8ce6;padding:0 12px;")
+                b.clicked.connect(lambda _=False, n=name: self._choose(n))
+                row.addWidget(b)
+            row.addStretch(1)
+            v.addLayout(row)
+        self.pad = NumberPad(rows=ALNUM_ROWS, height=50)
+        self.pad.attach(self.edit)
+        self.pad.entered.connect(self.accept)
+        v.addWidget(self.pad)
+        self.hint = QLabel("")
+        self.hint.setStyleSheet("font-size:12px;color:#b35c00;")
+        v.addWidget(self.hint)
+        v.addStretch(1)
+        btns = QHBoxLayout()
+        self.ok = QPushButton("OK  ✓")
+        self.ok.setMinimumHeight(60)
+        self.ok.setStyleSheet("font-size:20px;font-weight:600;background:#2ea043;color:white;border-radius:8px;")
+        self.ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.setMinimumHeight(60)
+        cancel.setStyleSheet("font-size:18px;border-radius:8px;")
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(self.ok, 2)
+        btns.addWidget(cancel, 1)
+        v.addLayout(btns)
+        self.edit.textChanged.connect(self._validate)
+        self.edit.returnPressed.connect(self.accept)
+        self._validate(self.edit.text())
+
+    def valid(self, text: str | None = None) -> bool:
+        text = (self.edit.text() if text is None else text).strip()
+        return bool(text) and (self._rx is None or self._rx.fullmatch(text) is not None)
+
+    def _validate(self, text: str) -> None:
+        ok = self.valid(text)
+        self.ok.setEnabled(ok)
+        self.hint.setText("" if ok or not text.strip() else "that does not look like a valid code")
+        self.edit.setStyleSheet("font-size:28px;letter-spacing:2px;" + ("" if ok or not text.strip() else "border:2px solid #f08c00;"))
+
+    def accept(self) -> None:
+        if self.valid():
+            super().accept()
+
+    def _choose(self, name: str) -> None:
+        self.edit.setText(name)
+        if self.valid():
+            super().accept()
+
+    def value(self) -> str:
+        return self.edit.text().strip()
+
+    @classmethod
+    def pick(cls, parent, current: str, choices=(), recent=(), pattern: str = "") -> str | None:
+        dlg = cls(parent, current, choices, recent, pattern)
+        return dlg.value() if dlg.exec() == QDialog.DialogCode.Accepted else None
 
 
 class HistoryStrip(QWidget):

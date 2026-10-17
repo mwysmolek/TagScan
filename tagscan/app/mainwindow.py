@@ -472,7 +472,7 @@ class MainWindow(QMainWindow):
             self.op_btn.setText(f"Operator: {self.operator_text}")
             self.op_btn.setStyleSheet("font-weight:600;text-align:left;")
         else:
-            self.op_btn.setText("Operator: —  (tap: who is scanning?)")
+            self.op_btn.setText("Operator: —  (tap: enter your code)")
             self.op_btn.setStyleSheet("font-weight:600;text-align:left;border:2px solid #f08c00;")
         self.card.idle_message = ("Point the camera at a label" if self.operator_text
                                   else "Set the operator first (button above), then point the camera at a label")
@@ -494,7 +494,8 @@ class MainWindow(QMainWindow):
         log.info("operator %r (%s)", text, source or "picked")
 
     def pick_operator(self):
-        val = OperatorPicker.pick(self, self.operator_text, list(self.profile.operators), self._recent_operators())
+        val = OperatorPicker.pick(self, self.operator_text, list(self.profile.operators), self._recent_operators(),
+                                  pattern=self.profile.operator_pattern)
         if val is not None:
             self.set_operator(val)
 
