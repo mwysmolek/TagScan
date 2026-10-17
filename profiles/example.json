@@ -22,5 +22,7 @@
   "aim_box": true,
   "box_aspect": 2.3,
   "box_width": 0.6,
-  "ocr_fail_passes": 3
+  "ocr_fail_passes": 3,
+  "scan_trigger": "tap",
+  "trigger_window": 3.0
 }

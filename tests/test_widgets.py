@@ -39,14 +39,20 @@ def test_card_pad_visibility_and_manual_entry(app):
     got = []
     card.confirmed.connect(lambda *a: got.append(a))
     card.lookup = lambda n: (n == "1001", "Cart" if n == "1001" else "", [])
-    assert card.state == "idle" and not card.pad.isHidden()
+    assert card.state == "idle" and not card.pad.isHidden() and not card.scan_btn.isHidden()
     card.set_accept("1001", "Cart", "QR", 60.0)
-    assert card.pad.isHidden() and not card.undo_btn.isHidden()
-    card._undo()
+    assert card.pad.isHidden() and not card.fix_btn.isHidden() and not card.discard_btn.isHidden() and card.scan_btn.isHidden()
+    card._undo()                                      # Correct
     assert card.state == "idle" and not card.pad.isHidden()
+    discarded = []
+    card.discarded.connect(lambda n: discarded.append(n))
+    card.set_accept("1001", "Cart", "QR", 60.0)
+    card._skip()                                      # Discard on the green card
+    assert discarded == ["1001"] and card.state == "idle"
     card.set_review("4711", "", "OCR", False, "not in list", nearest=[Item("1001", "1001", "Cart")])
-    assert not card.pad.isHidden() and not card.skip_btn.isHidden()
+    assert not card.pad.isHidden() and not card.discard_btn.isHidden() and card.fix_btn.isHidden()
     card._skip()
+    assert discarded == ["1001", "4711"]
     for k in "1001":
         card.pad._press(k)
     card.pad._press("✓")
@@ -79,11 +85,11 @@ def test_card_input_state(app):
     img = QImage(300, 120, QImage.Format.Format_RGB888)
     img.fill(0xff8800)
     card.set_input(img, prior="", reason="unreadable", nearest=[Item("1001", "1001", "Cart")])
-    assert card.state == "input" and not card.pic.isHidden() and card.skip_btn.text() == "Back" and card.ok_btn.isHidden()
+    assert card.state == "input" and not card.pic.isHidden() and not card.discard_btn.isHidden() and card.ok_btn.isHidden()
     card._ok()                                   # nothing to confirm on this screen
     assert card.state == "input" and not got
-    card._skip()                                 # Back
-    assert backed == [""] and card.state == "idle" and card.pic.isHidden() and card.skip_btn.text() == "Skip"
+    card._skip()                                 # Discard
+    assert backed == [""] and card.state == "idle" and card.pic.isHidden()
     card.set_input(None, prior="4717", reason="undo")
     assert card.pic.isHidden() and "Wrong read" in card.head.text()
     for k in "4711":
@@ -95,7 +101,7 @@ def test_card_input_state(app):
     assert got[-1] == ("1001", "MANUAL", True, "Cart", "unreadable", "corrected")
 
 
-def test_location_picker_choice_and_pad(app):
+def test_location_picker_choice_and_keyboard(app):
     dlg = LocationPicker(None, "Hall 2", choices=["Hall 2", "Hall 10", "Lab A"], recent=["Lab A"])
     buttons = [b for b in dlg.findChildren(type(dlg.pad._key("x", 1))) if b.text() in ("Hall 2", "Hall 10", "Lab A")]
     assert [b.text() for b in buttons] == ["Lab A", "Hall 2", "Hall 10"]       # recent first, no duplicates
@@ -103,10 +109,11 @@ def test_location_picker_choice_and_pad(app):
     assert dlg.exec() == dlg.DialogCode.Accepted and dlg.value() == "Hall 10"
 
     dlg = LocationPicker(None, "", choices=[], recent=[])
-    for k in ("2", "0", "4"):
+    for k in ("b", "ü", "r", "o", " ", "2", "0", "4"):                        # letters, umlauts, space, digits
         dlg.pad._press(k)
+    assert dlg.edit.text() == "büro 204"
     QTimer.singleShot(0, lambda: dlg.pad._press("✓"))
-    assert dlg.exec() == dlg.DialogCode.Accepted and dlg.value() == "204"
+    assert dlg.exec() == dlg.DialogCode.Accepted and dlg.value() == "büro 204"
 
 
 def test_operator_picker_alnum_pad_and_pattern(app):
@@ -130,3 +137,26 @@ def test_operator_picker_alnum_pad_and_pattern(app):
     # without a pattern anything non-empty goes
     dlg = OperatorPicker(None, "x1")
     assert dlg.ok.isEnabled() and dlg.valid()
+
+
+def test_history_strip_undo_last(app):
+    from tagscan.app.widgets import HistoryStrip
+    from tagscan.store import Scan
+    strip = HistoryStrip()
+    fired = []
+    strip.undo_last_requested.connect(lambda: fired.append(1))
+    strip.set_scans([])
+    assert not strip.undo_btn.isEnabled()
+    strip.set_scans([Scan(1, "2026-10-17 10:00:00", "1001", "Cart", "Hall 2", "QR", True, "", "dev")])
+    assert strip.undo_btn.isEnabled()
+    strip.undo_btn.click()
+    assert fired == [1]
+
+
+def test_light_theme(app):
+    from PySide6.QtGui import QPalette
+    from tagscan.app.theme import apply_light_theme
+    apply_light_theme(app)
+    pal = app.palette()
+    assert pal.color(QPalette.ColorRole.Text).lightness() < 80 and pal.color(QPalette.ColorRole.Base).lightness() > 240
+    assert pal.color(QPalette.ColorRole.ButtonText).lightness() < 80 and pal.color(QPalette.ColorRole.Window).lightness() > 230

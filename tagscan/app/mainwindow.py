@@ -10,7 +10,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 from PySide6.QtCore import Qt, QThread, Signal, QMutex, QWaitCondition, QSettings, QStandardPaths, QTimer
-from PySide6.QtGui import QAction, QColor, QKeySequence
+from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPixmap
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
                                QSizePolicy, QToolBar, QVBoxLayout, QWidget, QStatusBar)
 
@@ -20,6 +20,7 @@ from ..engine import Scanner
 from ..profile import Profile
 from ..store import Store
 from .aim import Box, Stability, box_rect, crop_box
+from .assets import asset_path
 from .camera import CameraSource, FolderSource, bgr_to_qimage
 from .sysinfo import rss_mb
 from .widgets import GREEN, ORANGE, BLUE, HistoryStrip, LocationPicker, OperatorPicker, ResultCard, VideoView, TOUCH
@@ -240,6 +241,10 @@ class MainWindow(QMainWindow):
         self._box_fail = 0              # empty OCR passes on the current steady box content
         self._need_change = False       # after a decision: wait until something new is in the box
         self._last_box_ocr = 0.0
+        self._armed_until = 0.0         # tap-to-scan: the box is read until this time
+        self._armed = False
+        self._last_crop = None
+        self._last_obs: list = []
         self._ctx: dict = {}            # what the pending card was read from (for the training record)
 
         self._build_ui()
@@ -269,6 +274,14 @@ class MainWindow(QMainWindow):
         tb.setMovable(False)
         tb.setStyleSheet(style)
         self.addToolBar(tb)
+        logo = QPixmap(str(asset_path("logo.png")))
+        if not logo.isNull():
+            self.setWindowIcon(QIcon(logo))
+            mark = QLabel()
+            mark.setPixmap(logo.scaled(44, 44, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            mark.setToolTip(f"kayEi TagScan {__version__}")
+            tb.addWidget(mark)
+            tb.addSeparator()
         self.list_btn = QPushButton("List …")
         self.list_btn.clicked.connect(self.choose_list)
         tb.addWidget(self.list_btn)
@@ -323,7 +336,7 @@ class MainWindow(QMainWindow):
         tb2.addWidget(self.zoom_in)
         tb2.addSeparator()
         self.read_btn = QPushButton("Read whole picture")
-        self.read_btn.setToolTip("OCR on the whole frame, for a label that does not fit the box (Space)")
+        self.read_btn.setToolTip("OCR on the whole frame, for a label that does not fit the box")
         self.read_btn.clicked.connect(self._force_ocr)
         tb2.addWidget(self.read_btn)
 
@@ -337,16 +350,20 @@ class MainWindow(QMainWindow):
         self.card = ResultCard()
         self.card.lookup = self._lookup
         self.card.confirmed.connect(self._confirmed)
-        self.card.skipped.connect(self._skipped)
+        self.card.discarded.connect(self._discarded)
         self.card.undone.connect(self._undone)
         self.card.backed.connect(self._backed)
+        self.card.scan_requested.connect(self._trigger)
         self.card.state_changed.connect(self._card_state)
+        if not logo.isNull():
+            self.card.set_logo(logo)
         h.addWidget(self.view, 3)
         h.addWidget(self.card, 1)
         v.addLayout(h, 1)
         self.history = HistoryStrip()
         self.history.delete_requested.connect(self._delete_scan)
         self.history.relocate_requested.connect(self._relocate_scan)
+        self.history.undo_last_requested.connect(self._undo_last)
         v.addWidget(self.history)
         self.setCentralWidget(central)
 
@@ -366,9 +383,9 @@ class MainWindow(QMainWindow):
         self._show_location()
         self._show_operator()
 
-        force = QAction("force OCR now", self)
+        force = QAction("scan now", self)
         force.setShortcut(QKeySequence(Qt.Key.Key_Space))
-        force.triggered.connect(self._force_ocr)
+        force.triggered.connect(self._trigger)
         self.addAction(force)
 
     # ------------------------------------------------------------------ list / profile
@@ -392,6 +409,9 @@ class MainWindow(QMainWindow):
             self._box_active = isinstance(self.source, CameraSource) and self.profile.aim_box
             if not self._box_active:
                 self.view.set_box(None)
+            self.card.scan_enabled = self._tap_mode()
+            if self.card.state == "idle":
+                self.card.set_idle()
         spec = self.profile.list
         if sheet:
             spec.sheet = sheet
@@ -511,11 +531,15 @@ class MainWindow(QMainWindow):
         source.status.connect(self._source_status)
         self._box_active = isinstance(source, CameraSource) and self.profile.aim_box
         self._stab.reset()
-        self._box_fail, self._need_change = 0, False
+        self._box_fail, self._need_change, self._armed = 0, False, False
         if not self._box_active:
             self.view.set_box(None)
+        self.card.scan_enabled = self._tap_mode()
         self.card.set_idle()
         source.start()
+
+    def _tap_mode(self) -> bool:
+        return self._box_active and self.profile.scan_trigger != "auto"
 
     def use_camera(self):
         cam = CameraSource(self, max_width=self.profile.camera_max_width)
@@ -554,7 +578,7 @@ class MainWindow(QMainWindow):
         if isinstance(self.source, FolderSource):
             self.source.paused = state != "idle"
         if self._box_active:
-            color = {"accept": GREEN, "review": ORANGE, "input": ORANGE}.get(state, WHITE)
+            color = {"accept": GREEN, "review": ORANGE, "input": ORANGE}.get(state, BLUE if self._armed else WHITE)
             self.view.set_box(self._box, color)
 
     def _source_status(self, text: str):
@@ -599,14 +623,33 @@ class MainWindow(QMainWindow):
             self._box = box
             self.view.set_box(box)
         crop, origin = crop_box(bgr, box)
+        self._last_crop = crop
         st = self._stab.update(crop)
         if st.changed and self._need_change:
             self._need_change, self._box_fail = False, 0
         if self.card.state not in ("idle", "input"):
             return
         now = time.perf_counter()
-        # codes: the crop at full resolution, and (inside the worker) the whole frame now and then;
-        # they keep running on the "type it" screen so a code can resolve a failed text read
+        if self._tap_mode():
+            # nothing is decoded until the operator asks; then the box (only the box) is read
+            # for trigger_window seconds, ending in a result or the "type it" screen
+            if not self._armed:
+                return
+            if now >= self._armed_until:
+                self._armed = False
+                if self.card.state == "idle":
+                    self._ctx = self._context(Job(crop, origin, box), self._last_obs, reason="unreadable")
+                    self._enter_input("unreadable", "", crop, self._suggestions(self._last_obs))
+                return
+            self.worker.submit_codes(Job(crop, origin, box))
+            if self.card.state != "idle":
+                return
+            if st.content and st.sharp and now - self._last_box_ocr >= self.profile.ocr_interval:
+                self._last_box_ocr = now
+                self.worker.submit_text(Job(crop, origin, box), force=True)
+            return
+        # auto mode: codes from the crop at full resolution and (inside the worker) the whole frame
+        # now and then; they keep running on the "type it" screen so a code can resolve a failed read
         self.worker.submit_codes(Job(crop, origin, box, full=bgr))
         if self.card.state != "idle":
             return
@@ -615,6 +658,25 @@ class MainWindow(QMainWindow):
             self._stab.mark_read()
             self.worker.submit_text(Job(crop, origin, box), force=True)
             self.view.set_box(box, BLUE)
+
+    def _trigger(self):
+        """SCAN / Space / a tap on the picture: read the box now (tap mode), or the whole frame
+        when there is no box."""
+        if not self._tap_mode():
+            self._force_ocr()
+            return
+        if self.card.state == "input":
+            self.card._skip()                       # the operator aims again: leave the type-it screen
+        if self.card.state != "idle":
+            return
+        self._armed = True
+        self._armed_until = time.perf_counter() + max(0.5, self.profile.trigger_window)
+        self._last_box_ocr = 0.0
+        self._last_obs = []
+        self._box_fail = 0
+        self._need_change = False
+        self.view.set_box(self._box, BLUE)
+        self.statusBar().showMessage("scanning the box …", int(self.profile.trigger_window * 1000))
 
     def _show_preview(self, bgr: np.ndarray) -> None:
         """Paint a view-sized copy: scaling 1920x1440 in QPainter on every frame is what kept
@@ -637,15 +699,18 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("reading the whole picture …", 1500)
 
     def _tapped(self, fx: float, fy: float):
-        """A tap on the picture moves the box there and reads at once; outside the picture (or
-        without the box) it is the whole-frame read."""
+        """A tap on the picture moves the box there and scans; outside the picture (or without
+        the box) it is the whole-frame read."""
         if self._box_active and fx >= 0:
             self._box_center = (fx, fy)
             self._stab.reset()
             self._box_fail, self._need_change, self._last_box_ocr = 0, False, 0.0
             if self.card.state == "input":
-                self.card._skip()                   # Back: the operator aims again instead
-            self.statusBar().showMessage("box moved", 1200)
+                self.card._skip()                   # the operator aims again instead
+            if self._tap_mode():
+                self._trigger()
+            else:
+                self.statusBar().showMessage("box moved", 1200)
         else:
             self._force_ocr()
 
@@ -692,20 +757,27 @@ class MainWindow(QMainWindow):
             sc = self.worker.scanner
             if sc is not None and sc.is_suppressed(dec.observation.number):
                 return          # decoded before the confirm/skip that suppressed this number; stale
-        if (self.card.state == "input" and dec.status in ("accept", "review")
-                and dec.observation is not None and dec.observation.source in ("QR", "BARCODE")):
-            self.card.set_idle()            # a code resolves what the text read could not
+        if (self.card.state == "input" and dec.status in ("accept", "review") and dec.observation is not None
+                and not self.card.manual.text().strip()):
+            # a code, or a text read that was still in flight, resolves what the type-it screen
+            # was opened for; the screen only stays if the operator has started typing
+            self.card.set_idle()
             self._ctx = {}
         if self.card.state != "idle":
             return
         from_box = job.box is not None
-        if from_box and self.card.state == "idle":
+        if from_box and any(o.source == "OCR" for o in obs):
+            self._last_obs = obs
+        if from_box and self.card.state == "idle" and not self._armed:
             self.view.set_box(self._box, WHITE)
         if dec.status == "seen":
             self._ctx = self._context(job, obs)
             self.card.set_seen(dec.observation.number, dec.votes)
+            if self._armed:                 # a first vote: give the second one time to arrive
+                self._armed_until = max(self._armed_until, time.perf_counter() + 1.5)
         elif dec.status in ("accept", "review"):
             self._box_fail = 0
+            self._armed = False
             o = dec.observation
             it = self.catalog.get(o.number)
             desc = it.description if it else ""
@@ -724,8 +796,9 @@ class MainWindow(QMainWindow):
                                      image=bgr_to_qimage(job.bgr) if from_box else None)
                 self.view.flash(ORANGE)
             self.card.setFocus()
-        elif from_box and dec.message != "suppressed" and not any(o.source != "OCR" for o in obs):
-            # an OCR pass on a steady, non-empty box that produced no usable number
+        elif (from_box and not self._tap_mode() and dec.message != "suppressed"
+              and not any(o.source != "OCR" for o in obs)):
+            # auto mode: an OCR pass on a steady, non-empty box that produced no usable number
             self._box_fail += 1
             if self._box_fail >= max(1, self.profile.ocr_fail_passes):
                 self._ctx = self._context(job, obs, reason="unreadable")
@@ -802,6 +875,7 @@ class MainWindow(QMainWindow):
         self._record(outcome, final_number=number, source=source, in_list=in_list, photo=scan.photo, scan_id=scan.id)
         self._ctx = {}
         self._need_change = True
+        self._armed = False
         self._stab.mark_read()
         self.worker.suppress(number)
         self.worker.reset()
@@ -809,19 +883,39 @@ class MainWindow(QMainWindow):
         self.view.flash(GREEN if in_list else ORANGE, 500)
         self._show_operator()
 
-    def _skipped(self, number):
-        self._record("skipped", final_number="", source=self._ctx.get("source", "") if self._ctx else "")
+    def _discarded(self, number):
+        """Discard on a green or orange card: what was captured is wrong or unwanted."""
+        self._record("discarded", final_number="", source=self._ctx.get("source", "") if self._ctx else "")
         self._ctx = {}
         self._need_change = True
+        self._armed = False
         self._stab.mark_read()
-        self.worker.suppress(number, 6.0)
+        self.worker.suppress(number, 10.0)
         self.worker.reset()
+        self.statusBar().showMessage("discarded", 2000)
+        self._show_operator()
+
+    def _undo_last(self):
+        """Remove the most recent scan (the one that slipped through)."""
+        last = self.store.recent(1)
+        if not last:
+            return
+        s = last[0]
+        self.store.delete(s.id)
+        self._ctx = {}
+        self.store.add_read("deleted", final_number=s.number, source=s.source, location=s.location,
+                            operator=self.operator_text)
+        self.worker.suppress(s.number, 10.0)
+        self._refresh_history()
+        self.statusBar().showMessage(f"removed scan {s.number}", 3000)
+        log.info("scan %s %s removed by the operator", s.id, s.number)
 
     def _undone(self, number):
         """Undo on a green card: the read was wrong. Record it, then offer the pad with the
         box content so the right number is one entry away."""
         ctx = self._ctx or {}
         self._record("undone", final_number="", source=ctx.get("source", ""))
+        self._armed = False
         self.worker.suppress(number, 10.0)
         self.worker.reset()
         image = ctx.get("crop")
@@ -834,6 +928,7 @@ class MainWindow(QMainWindow):
         self._record("back", final_number="", source=self._ctx.get("source", "") if self._ctx else "")
         self._ctx = {}
         self._need_change = True
+        self._armed = False
         self._stab.mark_read()
         self.worker.reset()
         self._show_operator()

@@ -36,16 +36,17 @@ Everything works with a finger; a keyboard is never required.
    named in the list (profile `list.location_column`), or a number pad for room numbers.
    Or skip the screen entirely and scan a **location code**: a QR code reading `LOC: Hall 3`
    switches the location (blue flash). Print one per room and stick it on the door.
-4. Hold the label inside the **aim box** on the picture. Codes resolve instantly, anywhere
-   in the picture. Printed labels are read from the box the moment its content holds still:
-   the number must be read twice and be in the list to auto-confirm. Tap the picture to move
-   the box there; **Read whole picture** (or Space) reads outside the box.
-5. Green card: **Found**, counts down, tap **Undo** if wrong. Orange card: **Check**, tap a
-   suggestion, **OK**, or type the number on the pad. Items already scanned also stop for a
-   check. The pad under the card adds a number by hand at any time.
-6. If three reads of a steady box come up empty, or you tap **Undo**, the card shows the box
-   content with the pad: tap a suggestion or type the number. **Back** if there is nothing
-   there.
+4. Hold the label inside the **aim box** on the picture and tap **SCAN** (or tap the picture,
+   or press Space). The box is read for a couple of seconds: QR codes and barcodes resolve at
+   once, printed text must be read twice and be in the list to auto-confirm. Nothing is
+   decoded between scans, so nothing gets captured by accident. A tap on the picture moves the
+   box there and scans. **Read whole picture** reads outside the box.
+5. Green card: **Found**, counts down. **OK** keeps it, **Correct** opens the pad with the
+   read shown, **Discard** drops it. Orange card: **Check**, tap a suggestion, **OK**, type
+   the number on the pad, or **Discard**. Items already scanned also stop for a check.
+6. If the scan comes up empty the card shows the box content with the pad: tap a suggestion
+   or type the number, or **Discard** if there is nothing there. **Undo last scan** next to
+   the recent strip removes a scan that slipped through.
 7. Recent scans sit at the bottom: tap one to delete it or change its location.
 8. **Export Excel**: sheets *Scans*, *List status* (found / missing per list item) and
    *Not in list*, each with location and operator; the file is named after device and
@@ -57,7 +58,8 @@ Everything works with a finger; a keyboard is never required.
 read small or distant labels, since the box is always cut from the full-resolution frame.
 With **Photos …** (no camera) the zoom crops the centre of each photo instead.
 
-Every decision is kept in `scans.sqlite` (table *reads*) with the box crop under
+The app forces one light look whatever the Windows theme is. Every decision is kept in
+`scans.sqlite` (table *reads*) with the box crop under
 `training\crops`, the frame, the text OCR saw and the number that was finally entered:
 what was read right, what was corrected, what could not be read. That is the training
 material for a label detector and for tuning the reader later.
@@ -92,10 +94,11 @@ Build the portable app (on Windows): `pip install -r packaging/requirements-buil
   camera is asked for at most `camera_max_width` (1920) pixels wide: the decoders downscale
   to 1280 (codes) and 960 (text) anyway, so a bigger frame costs CPU and RAM for nothing.
 * Aim box: the operator is the label detector. The box (`aim_box`, `box_aspect`, `box_width`)
-  is cut from the full-resolution frame, so the text keeps every pixel the camera has. A
-  48x27 thumbnail of the box content decides whether it holds still, has contrast and is
-  sharp; only then is it read, every `ocr_interval`, until a number is accepted or
-  `ocr_fail_passes` passes came up empty and the pad is offered instead.
+  is cut from the full-resolution frame, so the text keeps every pixel the camera has.
+  `scan_trigger: "tap"` (default) reads the box only after SCAN / a tap / Space, for
+  `trigger_window` seconds, and offers the pad when nothing came of it. `"auto"` reads
+  whenever a 48x27 thumbnail of the box content says it holds still, has contrast and is
+  sharp, and scans the whole picture for codes all the time.
 * Codes: [zxing-cpp](https://github.com/zxing-cpp/zxing-cpp) on the box crop about eight
   times a second and on the whole downscaled frame twice a second, limited to the formats in
   the profile (`code_formats`).

@@ -81,6 +81,7 @@ def test_box_flow_accept_unreadable_undo(app, tmp_path):
     prof.auto_confirm_seconds = 0.2
     prof.ocr_interval = 0.0
     prof.ocr_fail_passes = 3
+    prof.scan_trigger = "auto"
     settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
     win = MainWindow(profile=prof, catalog=cat, data_dir=str(tmp_path / "data"), settings=settings)
     win.show()
@@ -159,11 +160,70 @@ def test_box_flow_accept_unreadable_undo(app, tmp_path):
     assert scan.number == "123456" and scan.source == "MANUAL" and scan.note == "undo"
     row = win.store.db.execute("SELECT outcome, ocr_number, final_number, crop FROM reads ORDER BY id DESC LIMIT 1").fetchone()
     assert row[0] == "typed" and row[1] == "234567" and row[2] == "123456" and row[3]
-    assert win.store.read_counts() == {"accepted": 1, "back": 1, "confirmed": 1, "skipped": 1, "undone": 1, "typed": 1}
+    assert win.store.read_counts() == {"accepted": 1, "back": 1, "confirmed": 1, "discarded": 1, "undone": 1, "typed": 1}
 
     # 4. a tap on the picture moves the box there
     win.view.set_frame(__import__("tagscan.app.camera", fromlist=["bgr_to_qimage"]).bgr_to_qimage(frame2[::4, ::4]), 1920, 1440)
     win._tapped(0.25, 0.75)
     win._on_frame(frame2)
     assert win._box.x < 1920 * 0.25 < win._box.x + win._box.w and win._box.y < 1440 * 0.75 < win._box.y + win._box.h
+    win.close()
+
+
+def test_tap_to_scan_flow(app, tmp_path):
+    """Default mode: nothing is decoded until a trigger; then a result or the type-it screen."""
+    from tagscan.app.mainwindow import MainWindow
+    from tagscan.app.camera import CameraSource
+    cat = Catalog(items={"123456": Item("123456", "123456", "item one")})
+    prof = Profile()
+    prof.auto_confirm_seconds = 0.2
+    prof.ocr_interval = 0.0
+    prof.trigger_window = 1.5
+    assert prof.scan_trigger == "tap"
+    settings = QSettings(str(tmp_path / "settings.ini"), QSettings.Format.IniFormat)
+    win = MainWindow(profile=prof, catalog=cat, data_dir=str(tmp_path / "data"), settings=settings)
+    win.show()
+    assert _pump(lambda: isinstance(win.source, CameraSource), 10)
+    assert _pump(lambda: "ready" in win.engine_lbl.text(), 60), win.engine_lbl.text()
+    win.set_operator("456cd")
+    assert not win.card.scan_btn.isHidden()
+
+    # 1. a label in the box, no trigger: nothing happens
+    frame = _label_frame("123456")
+    t0 = time.time()
+    _pump(lambda: time.time() - t0 > 1.2, 3, step=lambda: win._on_frame(frame))
+    assert win.store.count() == 0 and win.card.state == "idle"
+
+    # 2. SCAN: read within the window, auto-accepted
+    win.card.scan_btn.click()
+    assert win._armed
+    assert _pump(lambda: win.store.count() == 1, 20, step=lambda: win._on_frame(frame)), win.card.head.text()
+    assert win.store.recent(1)[0].number == "123456" and not win._armed
+
+    # 3. a blank box + trigger: the window runs out -> type-it screen; Discard -> idle
+    blank = _textless_frame(seed=4)
+    win._trigger()
+    assert _pump(lambda: win.card.state == "input", 20, step=lambda: win._on_frame(blank)), win.card.head.text()
+    win.card._skip()
+    QCoreApplication.processEvents()
+    assert win.card.state == "idle" and win.store.db.execute("SELECT outcome FROM reads ORDER BY id DESC LIMIT 1").fetchone()[0] == "back"
+
+    # 4. a tap on the picture aims and scans in one go
+    from tagscan.app.camera import bgr_to_qimage
+    win.view.set_frame(bgr_to_qimage(frame[::4, ::4]), 1920, 1440)
+    win.worker.scanner.suppress("123456", 0.0)
+    win._tapped(0.5, 0.5)
+    assert win._armed
+    assert _pump(lambda: win.card.state == "review", 20, step=lambda: win._on_frame(frame)), win.card.head.text()
+    assert "already scanned" in win.card.head.text()
+    win.card._skip()                                             # Discard the orange card
+    QCoreApplication.processEvents()
+    assert win.store.db.execute("SELECT outcome FROM reads ORDER BY id DESC LIMIT 1").fetchone()[0] == "discarded"
+
+    # 5. Undo last scan removes the stored scan and its photo
+    photo = win.store.recent(1)[0].photo
+    assert (tmp_path / "data" / "photos" / photo).exists()
+    win._undo_last()
+    assert win.store.count() == 0 and not (tmp_path / "data" / "photos" / photo).exists()
+    assert win.store.db.execute("SELECT outcome, final_number FROM reads ORDER BY id DESC LIMIT 1").fetchone() == ("deleted", "123456")
     win.close()
