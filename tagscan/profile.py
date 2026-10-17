@@ -59,6 +59,11 @@ class Profile:
     box_aspect: float = 2.3           # width / height of the box (label shape)
     box_width: float = 0.6            # box width as a fraction of the frame at zoom 1
     ocr_fail_passes: int = 3          # empty OCR passes on a steady box before the "type it" screen
+    # "tap": nothing is decoded until the operator taps the picture / SCAN / Space, then the box is
+    # read for trigger_window seconds (result or the "type it" screen). "auto": read whenever the
+    # box content holds still, and scan the whole picture for codes all the time.
+    scan_trigger: str = "tap"
+    trigger_window: float = 3.0       # extended by 1.5 s whenever a first text vote lands
 
     @classmethod
     def from_dict(cls, d: dict) -> "Profile":

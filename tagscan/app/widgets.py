@@ -3,7 +3,7 @@ the location picker and the history strip. Everything can be driven with a finge
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal, QTimer, QPointF, QRectF, QEvent, QPoint
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPolygonF
+from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMenu, QProgressBar,
                                QPushButton, QScrollArea, QSizePolicy, QToolButton, QVBoxLayout, QWidget)
 
@@ -11,7 +11,12 @@ GREEN = QColor(46, 160, 67)
 ORANGE = QColor(240, 140, 0)
 BLUE = QColor(60, 140, 230)
 GREY = QColor(200, 200, 200)
+RED = QColor(209, 36, 47)
 TOUCH = 48      # minimum height of anything a finger has to hit
+TEXT = "#1b1f24"
+BTN_OK = "font-size:20px;font-weight:600;background:#2ea043;color:white;border-radius:8px;"
+BTN_DISCARD = "font-size:18px;font-weight:600;background:#d1242f;color:white;border-radius:8px;"
+BTN_PLAIN = f"font-size:18px;color:{TEXT};background:#e9ecf1;border:1px solid #c5c9d0;border-radius:8px;"
 
 
 def _remove_all(layout, keep_first: int = 0, keep_last: int = 0) -> None:
@@ -174,10 +179,13 @@ class VideoView(QWidget):
             p.drawText(QRectF(ox + 8, oy + dh - 28, dw - 16, 28), Qt.AlignmentFlag.AlignVCenter, self._text)
 
 
-ALNUM_ROWS = (("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
-              ("q", "w", "e", "r", "t", "z", "u", "i", "o", "p"),
-              ("a", "s", "d", "f", "g", "h", "j", "k", "l", "clear"),
-              ("y", "x", "c", "v", "b", "n", "m", "-", "⌫", "✓"))
+# the on-screen keyboard: digits, QWERTZ letters, umlauts, a few separators, space
+FULL_ROWS = (("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
+             ("q", "w", "e", "r", "t", "z", "u", "i", "o", "p"),
+             ("a", "s", "d", "f", "g", "h", "j", "k", "l", "ä"),
+             ("y", "x", "c", "v", "b", "n", "m", "ö", "ü", "ß"),
+             ("-", ".", "/", " ", "clear", "⌫", "✓"))
+ALNUM_ROWS = FULL_ROWS
 
 
 class NumberPad(QWidget):
@@ -213,13 +221,13 @@ class NumberPad(QWidget):
         label = {" ": "space", "⌫": "⌫", "✓": "✓"}.get(k, k)
         b = QPushButton(label)
         b.setMinimumHeight(height)
-        b.setMinimumWidth(height)
+        b.setMinimumWidth(height * (4 if k == " " else 1))
         b.setFocusPolicy(Qt.FocusPolicy.NoFocus)          # never steal the keyboard focus
-        style = "font-size:20px;border-radius:8px;padding:0 4px;"
+        style = f"font-size:20px;border-radius:8px;padding:0 4px;color:{TEXT};background:#ffffff;border:1px solid #c5c9d0;"
         if k == "✓":
-            style += "background:#2ea043;color:white;font-weight:600;"
+            style += "background:#2ea043;color:white;font-weight:600;border:none;"
         elif k in ("⌫", "clear"):
-            style += "background:#eee;font-size:16px;"
+            style += "background:#e5e7eb;font-size:16px;"
         b.setStyleSheet(style)
         b.clicked.connect(lambda _=False, k=k: self._press(k))
         return b
@@ -244,9 +252,10 @@ class ResultCard(QFrame):
     """Idle -> (seen) -> accept with countdown | review with buttons -> idle.
     The number pad under the card types a number without a keyboard."""
     confirmed = Signal(str, str, bool, str, str, str)   # number, source, in_list, description, note, outcome
-    skipped = Signal(str)                          # number (Skip on a review card)
-    undone = Signal(str)                           # number (Undo on a green card)
-    backed = Signal(str)                           # Back on the "type it" screen (prior number)
+    discarded = Signal(str)                        # number (Discard on a green or orange card)
+    undone = Signal(str)                           # number (Correct on a green card: wrong read, type it)
+    backed = Signal(str)                           # Discard on the "type it" screen (prior number)
+    scan_requested = Signal()                      # the big SCAN button
     state_changed = Signal(str)
 
     def __init__(self, parent=None):
@@ -256,6 +265,7 @@ class ResultCard(QFrame):
         self.setMinimumWidth(340)
         self.state = "idle"
         self.idle_message = "Point the camera at a label"      # the window may replace it (e.g. "set the operator")
+        self.scan_enabled = True                               # the SCAN button (tap-to-scan mode)
         self.pending: dict | None = None
         self._seconds = 3.0
         self._remaining = 0.0
@@ -270,14 +280,19 @@ class ResultCard(QFrame):
         self.head.setWordWrap(True)
         self.head.setStyleSheet("font-size:15px;color:#555;")
         self.number = QLabel("")
-        self.number.setStyleSheet("font-size:44px;font-weight:700;")
+        self.number.setStyleSheet(f"font-size:44px;font-weight:700;color:{TEXT};")
         self.number.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.desc = QLabel("")
         self.desc.setWordWrap(True)
-        self.desc.setStyleSheet("font-size:17px;")
+        self.desc.setStyleSheet(f"font-size:17px;color:{TEXT};")
         self.meta = QLabel("")
         self.meta.setWordWrap(True)
         self.meta.setStyleSheet("font-size:12px;color:#777;")
+        self.scan_btn = QPushButton("SCAN")
+        self.scan_btn.setMinimumHeight(72)
+        self.scan_btn.setStyleSheet("font-size:26px;font-weight:700;background:#2ea043;color:white;border-radius:10px;letter-spacing:2px;")
+        self.scan_btn.setToolTip("Read the box now (or tap the picture, or press Space)")
+        self._logo: QPixmap | None = None
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
         self.bar.setTextVisible(False)
@@ -297,31 +312,32 @@ class ResultCard(QFrame):
         btns = QHBoxLayout()
         self.ok_btn = QPushButton("OK  ✓")
         self.ok_btn.setMinimumHeight(60)
-        self.ok_btn.setStyleSheet("font-size:20px;font-weight:600;background:#2ea043;color:white;border-radius:8px;")
-        self.skip_btn = QPushButton("Skip")
-        self.skip_btn.setMinimumHeight(60)
-        self.skip_btn.setStyleSheet("font-size:18px;border-radius:8px;")
-        self.undo_btn = QPushButton("Undo")
-        self.undo_btn.setMinimumHeight(60)
-        self.undo_btn.setStyleSheet("font-size:18px;background:#f08c00;color:white;border-radius:8px;")
+        self.ok_btn.setStyleSheet(BTN_OK)
+        self.fix_btn = QPushButton("Correct")              # green card: the read is wrong, type the right one
+        self.fix_btn.setMinimumHeight(60)
+        self.fix_btn.setStyleSheet("font-size:18px;font-weight:600;background:#f08c00;color:white;border-radius:8px;")
+        self.discard_btn = QPushButton("Discard  ✗")       # every card: drop what was captured
+        self.discard_btn.setMinimumHeight(60)
+        self.discard_btn.setStyleSheet(BTN_DISCARD)
         btns.addWidget(self.ok_btn, 2)
-        btns.addWidget(self.skip_btn, 1)
-        btns.addWidget(self.undo_btn, 1)
+        btns.addWidget(self.fix_btn, 1)
+        btns.addWidget(self.discard_btn, 1)
 
         manual = QHBoxLayout()
         self.manual = QLineEdit()
         self.manual.setPlaceholderText("number …")
         self.manual.setMinimumHeight(TOUCH)
-        self.manual.setStyleSheet("font-size:20px;")
+        self.manual.setStyleSheet(f"font-size:20px;color:{TEXT};background:#ffffff;")
         self.manual_btn = QPushButton("Add")
         self.manual_btn.setMinimumHeight(TOUCH)
-        self.manual_btn.setStyleSheet("font-size:16px;")
+        self.manual_btn.setStyleSheet(f"font-size:16px;color:{TEXT};")
         manual.addWidget(self.manual, 1)
         manual.addWidget(self.manual_btn)
         self.pad = NumberPad(height=44)
         self.pad.attach(self.manual)
         self.pad.entered.connect(self._manual)
 
+        lay.addWidget(self.scan_btn)
         lay.addWidget(self.head)
         lay.addWidget(self.number)
         lay.addWidget(self.desc)
@@ -335,10 +351,11 @@ class ResultCard(QFrame):
         lay.addWidget(self.pad)
 
         self.ok_btn.clicked.connect(self._ok)
-        self.skip_btn.clicked.connect(self._skip)
-        self.undo_btn.clicked.connect(self._undo)
+        self.discard_btn.clicked.connect(self._skip)
+        self.fix_btn.clicked.connect(self._undo)
         self.manual_btn.clicked.connect(self._manual)
         self.manual.returnPressed.connect(self._manual)
+        self.scan_btn.clicked.connect(self.scan_requested.emit)
         self.lookup = None          # callable number -> (in_list, description, nearest[list of Item])
         self.set_idle()
 
@@ -353,15 +370,29 @@ class ResultCard(QFrame):
         self.desc.setText("")
         self.meta.setText("")
         self.bar.hide()
-        self.pic.hide()
-        self.pic.clear()
         self._clear_alts()
         self.ok_btn.hide()
-        self.skip_btn.hide()
-        self.skip_btn.setText("Skip")
-        self.undo_btn.hide()
+        self.discard_btn.hide()
+        self.fix_btn.hide()
+        self.scan_btn.setVisible(self.scan_enabled)
         self.pad.show()
+        self._show_logo()
         self.setStyleSheet("QFrame#card{background:#fafafa;border:1px solid #ddd;border-radius:10px;}")
+
+    def set_logo(self, pixmap: QPixmap | None) -> None:
+        self._logo = pixmap if pixmap is not None and not pixmap.isNull() else None
+        if self.state == "idle":
+            self._show_logo()
+
+    def _show_logo(self) -> None:
+        if self._logo is None:
+            self.pic.hide()
+            self.pic.clear()
+            return
+        self.pic.setStyleSheet("background:transparent;")
+        self.pic.setPixmap(self._logo.scaled(150, 150, Qt.AspectRatioMode.KeepAspectRatio,
+                                             Qt.TransformationMode.SmoothTransformation))
+        self.pic.show()
 
     def set_seen(self, number: str, votes: int):
         if self.state != "idle":
@@ -381,13 +412,14 @@ class ResultCard(QFrame):
         self.meta.setText(note)
         self._clear_alts()
         self.pic.hide()
+        self.scan_btn.hide()
         self.bar.show()
         self._seconds = max(0.05, seconds)
         self._remaining = self._seconds
         self.bar.setValue(1000)
         self.ok_btn.show()
-        self.skip_btn.hide()
-        self.undo_btn.show()
+        self.fix_btn.show()
+        self.discard_btn.show()
         self.pad.hide()
         self.setStyleSheet("QFrame#card{background:#e9f7ec;border:2px solid #2ea043;border-radius:10px;}")
         self._timer.start()
@@ -403,12 +435,12 @@ class ResultCard(QFrame):
         self.meta.setText("tap a suggestion, OK to keep as read, or type the number")
         self.bar.hide()
         self._timer.stop()
+        self.scan_btn.hide()
         self._show_pic(image)
         self._set_alts(nearest)
         self.ok_btn.show()
-        self.skip_btn.show()
-        self.skip_btn.setText("Skip")
-        self.undo_btn.hide()
+        self.fix_btn.hide()
+        self.discard_btn.show()
         self.pad.show()
         self.setStyleSheet("QFrame#card{background:#fff4e5;border:2px solid #f08c00;border-radius:10px;}")
 
@@ -428,12 +460,12 @@ class ResultCard(QFrame):
         self.meta.setText("tap a suggestion or type the number on the pad; Back if there is nothing to add")
         self.bar.hide()
         self._timer.stop()
+        self.scan_btn.hide()
         self._show_pic(image)
         self._set_alts(nearest)
         self.ok_btn.hide()
-        self.skip_btn.setText("Back")
-        self.skip_btn.show()
-        self.undo_btn.hide()
+        self.fix_btn.hide()
+        self.discard_btn.show()
         self.pad.show()
         self.manual.setFocus()
         self.setStyleSheet("QFrame#card{background:#eef3fb;border:2px solid #3c8ce6;border-radius:10px;}")
@@ -443,7 +475,7 @@ class ResultCard(QFrame):
             self.pic.hide()
             self.pic.clear()
             return
-        from PySide6.QtGui import QPixmap
+        self.pic.setStyleSheet("background:#222;border-radius:6px;")
         w = max(200, self.width() - 40)
         pm = QPixmap.fromImage(image).scaled(w, 220, Qt.AspectRatioMode.KeepAspectRatio,
                                              Qt.TransformationMode.SmoothTransformation)
@@ -455,7 +487,7 @@ class ResultCard(QFrame):
         for i, it in enumerate(list(nearest)[:4]):
             b = QPushButton(f"{it.number}\n{it.description[:34]}")
             b.setMinimumHeight(56)
-            b.setStyleSheet("text-align:left;font-size:13px;border-radius:6px;")
+            b.setStyleSheet(f"text-align:left;font-size:13px;border-radius:6px;color:{TEXT};background:#ffffff;border:1px solid #c5c9d0;")
             b.clicked.connect(lambda _=False, it=it: self._choose(it))
             self.alts_lay.addWidget(b, i // 2, i % 2)
 
@@ -476,10 +508,11 @@ class ResultCard(QFrame):
         self.confirmed.emit(p["number"], p["source"], p["in_list"], p["description"], p.get("note", ""), outcome)
 
     def _skip(self):
+        """Discard: drop what was captured (green or orange card), or leave the type-it screen."""
         n = self.pending["number"] if self.pending else ""
         was_input = self.state == "input"
         self.set_idle()
-        (self.backed if was_input else self.skipped).emit(n)
+        (self.backed if was_input else self.discarded).emit(n)
 
     def _undo(self):
         n = self.pending["number"] if self.pending else ""
@@ -517,9 +550,7 @@ class ResultCard(QFrame):
             self._ok("confirmed")
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self.manual.text().strip():
             self._manual()
-        elif key == Qt.Key.Key_Escape and self.state == "accept":
-            self._undo()
-        elif key == Qt.Key.Key_Escape and self.state in ("review", "input"):
+        elif key == Qt.Key.Key_Escape and self.state in ("accept", "review", "input"):
             self._skip()
         elif text.isdigit():                          # a hardware keyboard types into the number field
             self.manual.insert(text)
@@ -530,184 +561,103 @@ class ResultCard(QFrame):
 
 
 class TextPicker(QDialog):
-    """Pick a short text (the location, the operator) with a finger: choices and recent values
-    as big buttons, a number pad for room or staff numbers, and a text field for the rare
-    case a keyboard is at hand."""
+    """Pick or type a short text (the location, the operator) with a finger: choices and recent
+    values as big buttons, and a full on-screen keyboard (digits, letters, umlauts, space).
+    An optional ``pattern`` (regex) refuses anything else."""
 
     def __init__(self, parent=None, current: str = "", choices=(), recent=(), title: str = "Location",
-                 tap_hint: str = "Tap a location", placeholder: str = "room / hall",
+                 prompt: str = "Where are you scanning?  Tap a location or type it",
+                 placeholder: str = "room / hall",
                  code_hint: str = "Or scan a location code: a QR code reading  LOC: <name>  switches the "
                                   "location without touching the screen.",
-                 empty_hint: str = "No locations yet. Type one on the right, or give the list a\n"
-                                   "location column (profile: list.location_column) to see them here."):
-        super().__init__(parent)
-        self.setWindowTitle(title)
-        self.setModal(True)
-        self.resize(940, 640)
-        root = QHBoxLayout(self)
-        root.setSpacing(14)
-
-        # left: the choices
-        left = QVBoxLayout()
-        title_lbl = QLabel(tap_hint)
-        title_lbl.setStyleSheet("font-size:15px;color:#555;")
-        left.addWidget(title_lbl)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        inner = QWidget()
-        grid = QGridLayout(inner)
-        grid.setSpacing(8)
-        grid.setContentsMargins(0, 0, 0, 0)
-        seen: list[str] = []
-        for r in list(recent) + list(choices):
-            r = str(r).strip()
-            if r and r not in seen:
-                seen.append(r)
-        for i, name in enumerate(seen):
-            b = QPushButton(name)
-            b.setMinimumHeight(56)
-            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            style = "font-size:17px;border-radius:8px;text-align:left;padding:0 12px;"
-            if name in recent:
-                style += "border:2px solid #3c8ce6;"
-            if name == current:
-                style += "background:#e3effc;"
-            b.setStyleSheet(style)
-            b.clicked.connect(lambda _=False, n=name: self._choose(n))
-            grid.addWidget(b, i // 2, i % 2)
-        grid.setRowStretch(max(1, (len(seen) + 1) // 2), 1)
-        scroll.setWidget(inner)
-        left.addWidget(scroll, 1)
-        if not seen:
-            empty = QLabel(empty_hint)
-            empty.setStyleSheet("color:#777;")
-            left.addWidget(empty)
-        root.addLayout(left, 3)
-
-        # right: type it
-        right = QVBoxLayout()
-        self.edit = QLineEdit(current)
-        self.edit.setPlaceholderText(placeholder)
-        self.edit.setMinimumHeight(56)
-        self.edit.setStyleSheet("font-size:24px;")
-        right.addWidget(self.edit)
-        self.pad = NumberPad(extra=("-", "/", " ", "clear"))
-        self.pad.attach(self.edit)
-        self.pad.entered.connect(self.accept)
-        right.addWidget(self.pad)
-        hint = QLabel(code_hint)
-        hint.setWordWrap(True)
-        hint.setStyleSheet("font-size:12px;color:#777;")
-        right.addWidget(hint)
-        right.addStretch(1)
-        row = QHBoxLayout()
-        ok = QPushButton("OK  ✓")
-        ok.setMinimumHeight(60)
-        ok.setStyleSheet("font-size:20px;font-weight:600;background:#2ea043;color:white;border-radius:8px;")
-        ok.clicked.connect(self.accept)
-        cancel = QPushButton("Cancel")
-        cancel.setMinimumHeight(60)
-        cancel.setStyleSheet("font-size:18px;border-radius:8px;")
-        cancel.clicked.connect(self.reject)
-        row.addWidget(ok, 2)
-        row.addWidget(cancel, 1)
-        right.addLayout(row)
-        root.addLayout(right, 2)
-        self.edit.returnPressed.connect(self.accept)
-
-    def _choose(self, name: str) -> None:
-        self.edit.setText(name)
-        self.accept()
-
-    def value(self) -> str:
-        return self.edit.text().strip()
-
-    @classmethod
-    def pick(cls, parent, current: str, choices=(), recent=(), **kw) -> str | None:
-        dlg = cls(parent, current, choices, recent, **kw)
-        return dlg.value() if dlg.exec() == QDialog.DialogCode.Accepted else None
-
-
-class LocationPicker(TextPicker):
-    """The location picker (TextPicker with its default texts)."""
-
-
-class OperatorPicker(QDialog):
-    """Who is scanning: the person types their own short code (e.g. ``123ab``) on a
-    digits-and-letters pad. Recent codes and any names from the profile are one tap. An
-    optional ``pattern`` (regex from the profile) keeps typos out."""
-
-    def __init__(self, parent=None, current: str = "", choices=(), recent=(), pattern: str = ""):
+                 pattern: str = ""):
         super().__init__(parent)
         import re
-        self.setWindowTitle("Operator")
+        self.setWindowTitle(title)
         self.setModal(True)
-        self.resize(640, 560)
+        self.resize(1040, 700)
         self._rx = re.compile(pattern, re.I) if pattern else None
         v = QVBoxLayout(self)
         v.setSpacing(10)
-        title = QLabel("Who is scanning?  Enter your code")
-        title.setStyleSheet("font-size:16px;color:#555;")
-        v.addWidget(title)
+        lbl = QLabel(prompt)
+        lbl.setStyleSheet("font-size:16px;color:#555;")
+        v.addWidget(lbl)
         self.edit = QLineEdit(current)
-        self.edit.setPlaceholderText("your code, e.g. 123ab")
+        self.edit.setPlaceholderText(placeholder)
         self.edit.setMinimumHeight(60)
-        self.edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.edit.setStyleSheet("font-size:28px;letter-spacing:2px;")
+        self.edit.setStyleSheet(f"font-size:26px;color:{TEXT};background:#ffffff;")
         v.addWidget(self.edit)
+
         seen: list[str] = []
         for r in list(recent) + list(choices):
             r = str(r).strip()
             if r and r not in seen:
                 seen.append(r)
         if seen:
-            row = QHBoxLayout()
-            row.setSpacing(6)
-            lbl = QLabel("recent:")
-            lbl.setStyleSheet("color:#777;")
-            row.addWidget(lbl)
-            for name in seen[:6]:
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setMaximumHeight(190)
+            inner = QWidget()
+            grid = QGridLayout(inner)
+            grid.setSpacing(8)
+            grid.setContentsMargins(0, 0, 0, 0)
+            cols = 4
+            for i, name in enumerate(seen):
                 b = QPushButton(name)
-                b.setMinimumHeight(TOUCH)
-                b.setStyleSheet("font-size:16px;border-radius:8px;border:2px solid #3c8ce6;padding:0 12px;")
+                b.setMinimumHeight(54)
+                b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                style = f"font-size:16px;border-radius:8px;text-align:left;padding:0 12px;color:{TEXT};background:#ffffff;border:1px solid #c5c9d0;"
+                if name in recent:
+                    style += "border:2px solid #3c8ce6;"
+                if name == current:
+                    style += "background:#e3effc;"
+                b.setStyleSheet(style)
                 b.clicked.connect(lambda _=False, n=name: self._choose(n))
-                row.addWidget(b)
-            row.addStretch(1)
-            v.addLayout(row)
-        self.pad = NumberPad(rows=ALNUM_ROWS, height=50)
+                grid.addWidget(b, i // cols, i % cols)
+            grid.setRowStretch((len(seen) + cols - 1) // cols, 1)
+            scroll.setWidget(inner)
+            v.addWidget(scroll)
+
+        self.pad = NumberPad(rows=FULL_ROWS, height=46)
         self.pad.attach(self.edit)
         self.pad.entered.connect(self.accept)
         v.addWidget(self.pad)
         self.hint = QLabel("")
+        self.hint.setWordWrap(True)
         self.hint.setStyleSheet("font-size:12px;color:#b35c00;")
         v.addWidget(self.hint)
+        hint = QLabel(code_hint)
+        hint.setWordWrap(True)
+        hint.setStyleSheet("font-size:12px;color:#777;")
+        v.addWidget(hint)
         v.addStretch(1)
-        btns = QHBoxLayout()
+        row = QHBoxLayout()
         self.ok = QPushButton("OK  ✓")
         self.ok.setMinimumHeight(60)
-        self.ok.setStyleSheet("font-size:20px;font-weight:600;background:#2ea043;color:white;border-radius:8px;")
+        self.ok.setStyleSheet(BTN_OK)
         self.ok.clicked.connect(self.accept)
         cancel = QPushButton("Cancel")
         cancel.setMinimumHeight(60)
-        cancel.setStyleSheet("font-size:18px;border-radius:8px;")
+        cancel.setStyleSheet(BTN_PLAIN)
         cancel.clicked.connect(self.reject)
-        btns.addWidget(self.ok, 2)
-        btns.addWidget(cancel, 1)
-        v.addLayout(btns)
+        row.addWidget(self.ok, 2)
+        row.addWidget(cancel, 1)
+        v.addLayout(row)
         self.edit.textChanged.connect(self._validate)
         self.edit.returnPressed.connect(self.accept)
         self._validate(self.edit.text())
 
     def valid(self, text: str | None = None) -> bool:
         text = (self.edit.text() if text is None else text).strip()
-        return bool(text) and (self._rx is None or self._rx.fullmatch(text) is not None)
+        if self._rx is None:
+            return True
+        return bool(text) and self._rx.fullmatch(text) is not None
 
     def _validate(self, text: str) -> None:
         ok = self.valid(text)
         self.ok.setEnabled(ok)
         self.hint.setText("" if ok or not text.strip() else "that does not look like a valid code")
-        self.edit.setStyleSheet("font-size:28px;letter-spacing:2px;" + ("" if ok or not text.strip() else "border:2px solid #f08c00;"))
 
     def accept(self) -> None:
         if self.valid():
@@ -722,6 +672,34 @@ class OperatorPicker(QDialog):
         return self.edit.text().strip()
 
     @classmethod
+    def pick(cls, parent, current: str, choices=(), recent=(), **kw) -> str | None:
+        dlg = cls(parent, current, choices, recent, **kw)
+        return dlg.value() if dlg.exec() == QDialog.DialogCode.Accepted else None
+
+
+class LocationPicker(TextPicker):
+    """The location picker (TextPicker with its default texts)."""
+
+
+class OperatorPicker(TextPicker):
+    """Who is scanning: the person types their own short code (e.g. ``123ab``); recent codes
+    are one tap; ``pattern`` keeps typos out."""
+
+    def __init__(self, parent=None, current: str = "", choices=(), recent=(), pattern: str = ""):
+        super().__init__(parent, current, choices, recent, title="Operator",
+                         prompt="Who is scanning?  Enter your code",
+                         placeholder="your code, e.g. 123ab",
+                         code_hint="Or scan your badge: a QR code reading  OP: <code>  sets the operator "
+                                   "without touching the screen.",
+                         pattern=pattern)
+        self.edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.edit.setStyleSheet(f"font-size:28px;letter-spacing:2px;color:{TEXT};background:#ffffff;")
+
+    def valid(self, text: str | None = None) -> bool:
+        text = (self.edit.text() if text is None else text).strip()
+        return bool(text) and super().valid(text)
+
+    @classmethod
     def pick(cls, parent, current: str, choices=(), recent=(), pattern: str = "") -> str | None:
         dlg = cls(parent, current, choices, recent, pattern)
         return dlg.value() if dlg.exec() == QDialog.DialogCode.Accepted else None
@@ -730,6 +708,7 @@ class OperatorPicker(QDialog):
 class HistoryStrip(QWidget):
     delete_requested = Signal(int)
     relocate_requested = Signal(int)
+    undo_last_requested = Signal()                 # the "Undo last scan" button
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -741,15 +720,21 @@ class HistoryStrip(QWidget):
         self.title.setStyleSheet("color:#888;")
         self.lay.addWidget(self.title)
         self.lay.addStretch(1)
+        self.undo_btn = QPushButton("Undo last scan")
+        self.undo_btn.setMinimumHeight(54)
+        self.undo_btn.setStyleSheet(BTN_DISCARD.replace("font-size:18px", "font-size:15px"))
+        self.undo_btn.clicked.connect(self.undo_last_requested.emit)
+        self.lay.addWidget(self.undo_btn)
 
     def set_scans(self, scans) -> None:
-        _remove_all(self.lay, keep_first=1, keep_last=1)
+        _remove_all(self.lay, keep_first=1, keep_last=2)
+        self.undo_btn.setEnabled(bool(scans))
         for i, s in enumerate(scans):
             b = QToolButton()
             b.setText(f"{s.number}\n{(s.location or '-')[:14]}")
             b.setMinimumSize(100, 58)
             color = "#2ea043" if s.in_list else "#f08c00"
-            b.setStyleSheet(f"QToolButton{{border:2px solid {color};border-radius:8px;font-size:12px;}}")
+            b.setStyleSheet(f"QToolButton{{border:2px solid {color};border-radius:8px;font-size:12px;color:{TEXT};background:#ffffff;}}")
             b.setToolTip(f"{s.ts}  {s.source}\n{s.description}")
             b.clicked.connect(lambda _=False, sid=s.id, btn=b: self._menu(sid, btn))
             self.lay.insertWidget(1 + i, b)

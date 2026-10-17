@@ -28,6 +28,8 @@ def main(argv=None) -> int:
     app = QApplication(sys.argv[:1])
     app.setApplicationName("TagScan")
     app.setOrganizationName("kayEi")
+    from .theme import apply_light_theme
+    apply_light_theme(app)
     data_dir = _data_dir()
     _setup_logging(data_dir)
     from .mainwindow import MainWindow
@@ -59,6 +61,8 @@ def smoke() -> int:
     from PySide6.QtCore import QTimer, QSettings
     from PySide6.QtWidgets import QApplication
     app = QApplication(sys.argv[:1])
+    from .theme import apply_light_theme
+    apply_light_theme(app)
     home = os.environ.get("TAGSCAN_HOME")
     tmp = Path(home) / "smoke" if home else Path(tempfile.mkdtemp(prefix="tagscan-smoke-"))
     if tmp.exists():
