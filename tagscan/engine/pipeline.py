@@ -9,14 +9,14 @@ import numpy as np
 
 from ..catalog import Catalog
 from ..profile import Profile
-from .codes import decode_codes
+from .codes import decode_codes, formats_from_names
 from .parse import TextParser
 from .textocr import TextOCR
 
 
 @dataclass
 class Observation:
-    source: str                 # "QR", "BARCODE", "OCR"
+    source: str                 # "QR", "BARCODE", "OCR", "LOCATION"
     number: str
     text: str = ""
     level: str = "high"
@@ -28,7 +28,7 @@ class Observation:
 
 @dataclass
 class Decision:
-    status: str = "none"        # none | seen | accept | review
+    status: str = "none"        # none | seen | accept | review | location
     observation: Observation | None = None
     votes: int = 0
     message: str = ""
@@ -38,10 +38,12 @@ class Scanner:
     """Feed frames in, get observations and a decision out. Not thread-safe: one per worker."""
 
     def __init__(self, profile: Profile, catalog: Catalog | None = None):
-        self.profile = profile
         self.catalog = catalog or Catalog()
+        self.profile = profile
         self.parser = TextParser(profile)
-        self.ocr = TextOCR(self.parser, max_side=profile.ocr_max_side)
+        self.ocr = TextOCR(self.parser, max_side=profile.ocr_max_side, rotations=profile.ocr_rotations,
+                           threads=profile.ocr_threads)
+        self.formats = formats_from_names(profile.code_formats)
         self._last_ocr = 0.0
         self._streak_number = ""
         self._streak = 0
@@ -52,6 +54,16 @@ class Scanner:
 
     def warmup(self) -> None:
         self.ocr.warmup()
+
+    def apply_profile(self, profile: Profile) -> None:
+        """Switch label family at runtime (a tagscan_profile.json next to a newly chosen list)."""
+        self.profile = profile
+        self.parser = TextParser(profile)
+        self.ocr.parser = self.parser
+        self.ocr.max_side = profile.ocr_max_side
+        self.ocr.rotations = tuple(profile.ocr_rotations)
+        self.formats = formats_from_names(profile.code_formats)
+        self.reset()
 
     def suppress(self, number: str, seconds: float = 8.0) -> None:
         """Ignore this number for a while (the item just confirmed is still in view)."""
@@ -78,13 +90,22 @@ class Scanner:
         self.stats["frames"] += 1
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         obs: list[Observation] = []
-        for hit in decode_codes(gray, self.parser):
+        for hit in decode_codes(gray, self.parser, formats=self.formats):
             self.stats["codes"] += 1
+            loc = self.parser.parse_location(hit.text)
+            if loc:
+                o = Observation(source="LOCATION", number="", text=loc, in_list=True, boxes=[hit.quad])
+                key = "\x00location:" + loc
+                if self._is_suppressed(key):
+                    obs.append(o)
+                    continue
+                self._suppressed[key] = time.time() + 5.0
+                return obs + [o], Decision(status="location", observation=o, votes=1, message=loc)
             if not hit.number:
                 continue
             obs.append(Observation(source=hit.format, number=hit.number, text=hit.text,
                                    in_list=hit.number in self.catalog, boxes=[hit.quad]))
-        live = [o for o in obs if not self._is_suppressed(o.number)]
+        live = [o for o in obs if o.number and not self._is_suppressed(o.number)]
         if live:
             o = live[0]
             with self._lock:

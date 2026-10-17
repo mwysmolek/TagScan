@@ -19,14 +19,25 @@ class CodeHit:
     quad: list = field(default_factory=list)     # 4 (x, y) points in input coordinates
 
 
-def decode_codes(gray: np.ndarray, parser, max_side: int = 1280) -> list[CodeHit]:
+def formats_from_names(names) -> "object | None":
+    """zxing-cpp format set from names like ["QRCode", "Code128"]; None = all formats."""
+    if zxingcpp is None or not names:
+        return None
+    try:
+        return zxingcpp.barcode_formats_from_str("|".join(names))
+    except Exception:
+        return None
+
+
+def decode_codes(gray: np.ndarray, parser, max_side: int = 1280, formats=None) -> list[CodeHit]:
     if zxingcpp is None:
         return []
     h, w = gray.shape[:2]
     s = min(1.0, max_side / max(h, w))
     img = gray if s >= 1.0 else _resize(gray, s)
     hits = []
-    for r in zxingcpp.read_barcodes(img):
+    kw = {"formats": formats} if formats is not None else {}
+    for r in zxingcpp.read_barcodes(img, **kw):
         if not r.valid or not r.text:
             continue
         p = r.position

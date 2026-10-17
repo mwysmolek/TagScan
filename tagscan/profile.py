@@ -18,6 +18,7 @@ class ListSpec:
     header_row: int = 1               # 1-based row holding the column titles
     number_column: int = 1            # 1-based column with the inventory number
     description_columns: list[int] = field(default_factory=lambda: [2])
+    location_column: int = 0          # 1-based column with the item's location (0 = none); feeds the location picker
     delimiter: str | None = None      # csv/txt delimiter (None = sniff)
 
 
@@ -37,6 +38,16 @@ class Profile:
     votes_needed: int = 2             # identical OCR reads before a text hit is accepted
     ocr_interval: float = 0.5         # seconds between OCR passes while scanning
     ocr_max_side: int = 960           # frames are downscaled to this before OCR
+    # orientations tried per OCR pass (degrees). RapidOCR's line classifier handles upside-down
+    # text, so 0 and 90 cover all four label orientations at half the cost of trying all four.
+    ocr_rotations: list[int] = field(default_factory=lambda: [0, 90])
+    ocr_threads: int = 0              # ONNX threads for OCR; 0 = half the logical CPUs (max 4)
+    code_interval: float = 0.12       # seconds between QR/barcode decodes
+    # zxing-cpp format names to look for; [] = every format (slower). Code 128 and QR are the usual ones.
+    code_formats: list[str] = field(default_factory=lambda: ["QRCode", "DataMatrix", "Code128", "Code39", "EAN13", "EAN8", "ITF"])
+    # a QR/barcode whose text matches this sets the scanning location instead of an item; group 1 = location
+    location_code_regex: str = r"^\s*(?:LOC|ORT|LOCATION|STANDORT|RAUM|ROOM)\s*[:=]\s*(.+?)\s*$"
+    camera_max_width: int = 1920      # largest camera frame width requested; more pixels cost CPU, not accuracy
 
     @classmethod
     def from_dict(cls, d: dict) -> "Profile":

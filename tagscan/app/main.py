@@ -32,7 +32,7 @@ def main(argv=None) -> int:
     _setup_logging(data_dir)
     from .mainwindow import MainWindow
     win = MainWindow(data_dir=str(data_dir))
-    win.show()
+    win.showMaximized()                 # a tablet app: use the whole screen
     return app.exec()
 
 

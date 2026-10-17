@@ -25,6 +25,7 @@ class Item:
     key: str                      # normalized
     description: str = ""
     extra: list = field(default_factory=list)
+    location: str = ""            # from the profile's location_column, if any
 
 
 @dataclass
@@ -41,6 +42,11 @@ class Catalog:
 
     def get(self, number) -> Item | None:
         return self.items.get(normalize_number(number))
+
+    def locations(self) -> list[str]:
+        """Distinct locations named in the list (profile ``list.location_column``), naturally sorted."""
+        seen = {it.location: None for it in self.items.values() if it.location}
+        return sorted(seen, key=_natural_key)
 
     def nearest(self, number, k: int = 5) -> list[Item]:
         key = normalize_number(number)
@@ -134,9 +140,15 @@ class Catalog:
             return
         desc_parts = [str(cell(c)).strip() for c in spec.description_columns if cell(c) not in (None, "")]
         number = str(int(raw)) if isinstance(raw, float) and raw.is_integer() else str(raw).strip()
+        loc = cell(spec.location_column) if spec.location_column else None
         self.items[key] = Item(number=number, key=key,
                                description=" | ".join(desc_parts),
-                               extra=[cell(c) for c in spec.description_columns])
+                               extra=[cell(c) for c in spec.description_columns],
+                               location="" if loc in (None, "") else str(loc).strip())
+
+
+def _natural_key(s: str):
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
 
 
 def _edit_distance(a: str, b: str) -> int:

@@ -5,9 +5,15 @@
   "number_digits": [4, 8],
   "allow_dotted_numbers": true,
   "code_number_regex": "(?:Nr|No|Number)\\.?\\s*:?\\s*\\n?\\s*(\\d{4,8})",
-  "list": {"sheet": null, "header_row": 1, "number_column": 1, "description_columns": [2]},
+  "list": {"sheet": null, "header_row": 1, "number_column": 1, "description_columns": [2], "location_column": 0},
   "auto_confirm_seconds": 3.0,
   "votes_needed": 2,
   "ocr_interval": 0.5,
-  "ocr_max_side": 960
+  "ocr_max_side": 960,
+  "ocr_rotations": [0, 90],
+  "ocr_threads": 0,
+  "code_interval": 0.12,
+  "code_formats": ["QRCode", "DataMatrix", "Code128", "Code39", "EAN13", "EAN8", "ITF"],
+  "location_code_regex": "^\\s*(?:LOC|ORT|LOCATION|STANDORT|RAUM|ROOM)\\s*[:=]\\s*(.+?)\\s*$",
+  "camera_max_width": 1920
 }

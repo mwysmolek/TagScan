@@ -6,11 +6,12 @@ import os
 import time
 from pathlib import Path
 
+import cv2
 import numpy as np
 from PySide6.QtCore import Qt, QThread, Signal, QMutex, QWaitCondition, QSettings, QStandardPaths, QTimer
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow,
-                               QMessageBox, QPushButton, QSlider, QToolBar, QVBoxLayout, QWidget, QStatusBar)
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
+                               QSizePolicy, QToolBar, QVBoxLayout, QWidget, QStatusBar)
 
 from .. import __version__
 from ..catalog import Catalog
@@ -18,9 +19,13 @@ from ..engine import Scanner
 from ..profile import Profile
 from ..store import Store
 from .camera import CameraSource, FolderSource, bgr_to_qimage
-from .widgets import GREEN, ORANGE, BLUE, HistoryStrip, ResultCard, VideoView
+from .sysinfo import rss_mb
+from .widgets import GREEN, ORANGE, BLUE, HistoryStrip, LocationPicker, ResultCard, VideoView, TOUCH
 
 log = logging.getLogger("tagscan")
+
+PREVIEW_MAX = 1024          # the preview is never painted larger than this (or the view) on a side
+ZOOM_MIN, ZOOM_MAX = 1.0, 3.0
 
 
 class _FrameQueue:
@@ -57,7 +62,7 @@ class _FrameQueue:
 
 
 class CodeWorker(QThread):
-    """Decodes QR/barcodes on every frame it gets (a few ms each)."""
+    """Decodes QR/barcodes on the frames it gets (tens of ms each on a tablet)."""
     result = Signal(object, object, object)
 
     def __init__(self, scanner_holder, parent=None):
@@ -130,6 +135,7 @@ class ScanWorker:
         self.codes = CodeWorker(self.holder, parent)
         self.ready = self.ocr.ready
         self.timing = self.ocr.timing
+        self._last_code = 0.0
 
     @property
     def scanner(self) -> Scanner | None:
@@ -144,7 +150,12 @@ class ScanWorker:
         self.codes.result.connect(slot)
 
     def submit(self, frame, force: bool = False) -> None:
-        self.codes.q.put(frame)
+        """Hand a frame to the decoders. Codes run at most every ``code_interval``; the OCR
+        thread throttles itself by ``ocr_interval``. Both mailboxes keep only the newest frame."""
+        now = time.monotonic()
+        if force or now - self._last_code >= self.profile.code_interval:
+            self._last_code = now
+            self.codes.q.put(frame)
         self.ocr.q.put(frame, force)
 
     def stop(self) -> None:
@@ -152,6 +163,12 @@ class ScanWorker:
         self.ocr.q.close()
         self.codes.wait(3000)
         self.ocr.wait(3000)
+
+    def set_profile(self, profile: Profile) -> None:
+        self.profile = profile
+        self.ocr.profile = profile
+        if self.scanner:
+            self.scanner.apply_profile(profile)
 
     def set_catalog(self, catalog: Catalog) -> None:
         self.catalog = catalog
@@ -180,10 +197,12 @@ class MainWindow(QMainWindow):
         self.profile = profile or Profile()
         self.catalog = catalog or Catalog()
         self.source = None
+        self.location_text = str(self.settings.value("location", "") or "")
         self._zoom = 1.0
-        self._last_submit = 0.0
         self._last_frame = None
-        self._busy_decision = False
+        self._pending_frame = None
+        self._frames = 0
+        self._stats_ticks = 0
 
         self._build_ui()
         self.worker = ScanWorker(self.profile, self.catalog, self)
@@ -191,6 +210,10 @@ class MainWindow(QMainWindow):
         self.worker.timing.connect(self._ocr_timing)
         self.worker.connect_result(self._on_result)
         self.worker.start()
+
+        self._stats_timer = QTimer(self)
+        self._stats_timer.timeout.connect(self._update_stats)
+        self._stats_timer.start(1000)
 
         if source is not None:
             self.set_source(source)
@@ -201,55 +224,74 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ ui
     def _build_ui(self):
-        tb = QToolBar("main")
-        tb.setMovable(False)
-        tb.setStyleSheet("QToolBar{spacing:8px;padding:4px;} QToolButton,QPushButton{font-size:14px;min-height:36px;padding:4px 10px;}")
-        self.addToolBar(tb)
+        style = (f"QToolBar{{spacing:8px;padding:4px;}} QToolButton,QPushButton{{font-size:15px;min-height:{TOUCH}px;padding:4px 14px;}}"
+                 f"QComboBox{{font-size:15px;min-height:{TOUCH}px;}} QComboBox QAbstractItemView::item{{min-height:40px;}}")
 
+        tb = QToolBar("list")
+        tb.setMovable(False)
+        tb.setStyleSheet(style)
+        self.addToolBar(tb)
         self.list_btn = QPushButton("List …")
         self.list_btn.clicked.connect(self.choose_list)
         tb.addWidget(self.list_btn)
         self.sheet_box = QComboBox()
-        self.sheet_box.setMinimumWidth(150)
+        self.sheet_box.setMinimumWidth(170)
         self.sheet_box.currentTextChanged.connect(self._sheet_changed)
         tb.addWidget(self.sheet_box)
         tb.addSeparator()
-        tb.addWidget(QLabel(" Location: "))
-        self.location = QLineEdit(self.settings.value("location", ""))
-        self.location.setPlaceholderText("room / hall")
-        self.location.setMinimumWidth(160)
-        self.location.setStyleSheet("font-size:15px;min-height:34px;")
-        self.location.textChanged.connect(lambda t: self.settings.setValue("location", t))
-        tb.addWidget(self.location)
-        tb.addSeparator()
-        self.camera_box = QComboBox()
-        self.camera_box.setMinimumWidth(180)
-        tb.addWidget(self.camera_box)
-        self.cam_btn = QPushButton("Camera")
-        self.cam_btn.clicked.connect(self.use_camera)
-        tb.addWidget(self.cam_btn)
-        self.photos_btn = QPushButton("Photos …")
-        self.photos_btn.clicked.connect(self.choose_photos)
-        tb.addWidget(self.photos_btn)
-        tb.addSeparator()
-        tb.addWidget(QLabel(" Zoom "))
-        self.zoom = QSlider(Qt.Orientation.Horizontal)
-        self.zoom.setRange(10, 30)
-        self.zoom.setValue(int(float(self.settings.value("zoom", 10))))
-        self.zoom.setFixedWidth(140)
-        self.zoom.valueChanged.connect(self._zoom_changed)
-        self._zoom_changed(self.zoom.value())
-        tb.addWidget(self.zoom)
-        tb.addSeparator()
+        self.loc_btn = QPushButton()
+        self.loc_btn.setMinimumWidth(260)
+        self.loc_btn.setStyleSheet("font-weight:600;text-align:left;")
+        self.loc_btn.clicked.connect(self.pick_location)
+        tb.addWidget(self.loc_btn)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        tb.addWidget(spacer)
         self.export_btn = QPushButton("Export Excel")
         self.export_btn.clicked.connect(self.export)
         tb.addWidget(self.export_btn)
+
+        self.addToolBarBreak()
+        tb2 = QToolBar("camera")
+        tb2.setMovable(False)
+        tb2.setStyleSheet(style)
+        self.addToolBar(tb2)
+        self.camera_box = QComboBox()
+        self.camera_box.setMinimumWidth(200)
+        tb2.addWidget(self.camera_box)
+        self.cam_btn = QPushButton("Camera")
+        self.cam_btn.clicked.connect(self.use_camera)
+        tb2.addWidget(self.cam_btn)
+        self.photos_btn = QPushButton("Photos …")
+        self.photos_btn.clicked.connect(self.choose_photos)
+        tb2.addWidget(self.photos_btn)
+        tb2.addSeparator()
+        tb2.addWidget(QLabel(" Zoom "))
+        self.zoom_out = QPushButton("−")
+        self.zoom_out.setFixedWidth(TOUCH + 8)
+        self.zoom_out.clicked.connect(lambda: self._zoom_step(-0.25))
+        tb2.addWidget(self.zoom_out)
+        self.zoom_lbl = QLabel("1×")
+        self.zoom_lbl.setStyleSheet("font-size:16px;min-width:44px;")
+        self.zoom_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tb2.addWidget(self.zoom_lbl)
+        self.zoom_in = QPushButton("+")
+        self.zoom_in.setFixedWidth(TOUCH + 8)
+        self.zoom_in.clicked.connect(lambda: self._zoom_step(+0.25))
+        tb2.addWidget(self.zoom_in)
+        tb2.addSeparator()
+        self.read_btn = QPushButton("Read text now")
+        self.read_btn.setToolTip("Run OCR on the current picture (or tap the picture, or press Space)")
+        self.read_btn.clicked.connect(self._force_ocr)
+        tb2.addWidget(self.read_btn)
 
         central = QWidget()
         v = QVBoxLayout(central)
         v.setContentsMargins(6, 6, 6, 6)
         h = QHBoxLayout()
         self.view = VideoView()
+        self.view.tapped.connect(self._force_ocr)
+        self.view.pinched.connect(lambda f: self._set_zoom(self._zoom * f))
         self.card = ResultCard()
         self.card.lookup = self._lookup
         self.card.confirmed.connect(self._confirmed)
@@ -269,15 +311,20 @@ class MainWindow(QMainWindow):
         self.engine_lbl = QLabel("starting engine …")
         self.timing_lbl = QLabel("")
         self.timing_lbl.setStyleSheet("color:#777;")
+        self.stats_lbl = QLabel("")
+        self.stats_lbl.setStyleSheet("color:#777;")
         self.count_lbl = QLabel("")
         self.statusBar().addWidget(self.engine_lbl, 1)
         self.statusBar().addPermanentWidget(self.timing_lbl)
+        self.statusBar().addPermanentWidget(self.stats_lbl)
         self.statusBar().addPermanentWidget(self.count_lbl)
         self._refresh_history()
+        self._set_zoom(float(self.settings.value("zoom", 10)) / 10.0, save=False)
+        self._show_location()
 
         force = QAction("force OCR now", self)
         force.setShortcut(QKeySequence(Qt.Key.Key_Space))
-        force.triggered.connect(lambda: self._last_frame is not None and self.worker.submit(self._last_frame, force=True))
+        force.triggered.connect(self._force_ocr)
         self.addAction(force)
 
     # ------------------------------------------------------------------ list / profile
@@ -297,13 +344,7 @@ class MainWindow(QMainWindow):
         prof = Profile.find_near(path)
         if prof:
             self.profile = prof
-            self.worker.profile = prof
-            self.worker.ocr.profile = prof
-            sc = self.worker.scanner
-            if sc:
-                sc.profile = prof
-                sc.parser.__init__(prof)
-                sc.ocr.parser = sc.parser
+            self.worker.set_profile(prof)
         spec = self.profile.list
         if sheet:
             spec.sheet = sheet
@@ -343,6 +384,35 @@ class MainWindow(QMainWindow):
         it = self.catalog.get(number)
         return (it is not None, it.description if it else "", self.catalog.nearest(number, 4))
 
+    # ------------------------------------------------------------------ location
+    def _recent_locations(self) -> list[str]:
+        v = self.settings.value("recent_locations", [])
+        if isinstance(v, str):
+            v = [v] if v else []
+        return [str(x) for x in (v or []) if str(x).strip()]
+
+    def _show_location(self):
+        self.loc_btn.setText(f"Location: {self.location_text or '—  (tap to set)'}")
+
+    def set_location(self, text: str, source: str = "") -> None:
+        text = (text or "").strip()
+        self.location_text = text
+        self.settings.setValue("location", text)
+        if text:
+            recent = [text] + [r for r in self._recent_locations() if r != text]
+            self.settings.setValue("recent_locations", recent[:12])
+        self._show_location()
+        if source == "code":
+            self.statusBar().showMessage(f"location set by code: {text}", 4000)
+            self.view.set_text(f"location: {text}")
+            self.view.flash(BLUE, 600)
+        log.info("location %r (%s)", text, source or "picked")
+
+    def pick_location(self):
+        val = LocationPicker.pick(self, self.location_text, self.catalog.locations(), self._recent_locations())
+        if val is not None:
+            self.set_location(val)
+
     # ------------------------------------------------------------------ sources
     def set_source(self, source):
         if self.source is not None:
@@ -357,7 +427,7 @@ class MainWindow(QMainWindow):
         source.start()
 
     def use_camera(self):
-        cam = CameraSource(self)
+        cam = CameraSource(self, max_width=self.profile.camera_max_width)
         devices = cam.devices()
         self.camera_box.blockSignals(True)
         self.camera_box.clear()
@@ -397,9 +467,16 @@ class MainWindow(QMainWindow):
     def _source_status(self, text: str):
         self.view.set_text(text)
 
-    def _zoom_changed(self, v: int):
-        self._zoom = v / 10.0
-        self.settings.setValue("zoom", v)
+    # ------------------------------------------------------------------ zoom
+    def _zoom_step(self, delta: float):
+        self._set_zoom(round((self._zoom + delta) * 4) / 4)
+
+    def _set_zoom(self, z: float, save: bool = True):
+        z = max(ZOOM_MIN, min(ZOOM_MAX, float(z)))
+        self._zoom = z
+        self.zoom_lbl.setText(f"{z:.2f}×".replace(".00×", "×").replace("0×", "×") if z != 1.0 else "1×")
+        if save:
+            self.settings.setValue("zoom", int(round(z * 10)))
 
     # ------------------------------------------------------------------ frames
     def _on_frame(self, bgr: np.ndarray):
@@ -409,11 +486,28 @@ class MainWindow(QMainWindow):
             x0, y0 = (w - cw) // 2, (h - ch) // 2
             bgr = np.ascontiguousarray(bgr[y0:y0 + ch, x0:x0 + cw])
         self._last_frame = bgr
-        self.view.set_frame(bgr_to_qimage(bgr))
-        now = time.time()
-        if now - self._last_submit >= 0.04 and self.card.state == "idle":
-            self._last_submit = now
+        self._frames += 1
+        self._show_preview(bgr)
+        if self.card.state == "idle":
             self.worker.submit(bgr)
+
+    def _show_preview(self, bgr: np.ndarray) -> None:
+        """Paint a view-sized copy: scaling 1920x1440 in QPainter on every frame is what kept
+        the GUI thread busy; a 2-4 ms OpenCV resize here replaces it."""
+        h, w = bgr.shape[:2]
+        vw, vh = min(PREVIEW_MAX, max(320, self.view.width())), min(PREVIEW_MAX, max(240, self.view.height()))
+        s = min(1.0, vw / w, vh / h)
+        if s < 0.999:
+            inter = cv2.INTER_AREA if s < 0.6 else cv2.INTER_LINEAR
+            small = cv2.resize(bgr, (max(1, int(w * s)), max(1, int(h * s))), interpolation=inter)
+        else:
+            small = bgr
+        self.view.set_frame(bgr_to_qimage(small), w, h)
+
+    def _force_ocr(self):
+        if self._last_frame is not None:
+            self.worker.submit(self._last_frame, force=True)
+            self.statusBar().showMessage("reading text …", 1500)
 
     def _ocr_timing(self, seconds: float):
         self._ocr_times = (getattr(self, "_ocr_times", []) + [seconds])[-20:]
@@ -423,15 +517,33 @@ class MainWindow(QMainWindow):
     def _engine_ready(self, msg: str):
         self.engine_lbl.setText(msg + (f" · {len(self.catalog)} items" if len(self.catalog) else " · no list loaded"))
 
+    def _update_stats(self):
+        fps, self._frames = self._frames, 0
+        mem = rss_mb()
+        parts = [f"{fps} fps"]
+        if isinstance(self.source, CameraSource) and self.source.dropped:
+            parts.append(f"{self.source.dropped} dropped")
+        if mem >= 0:
+            parts.append(f"{mem} MB")
+        self.stats_lbl.setText(" · ".join(parts))
+        self._stats_ticks += 1
+        if self._stats_ticks % 60 == 0:
+            log.info("stats: %s · OCR %s", self.stats_lbl.text(), self.timing_lbl.text() or "-")
+
     def _on_result(self, obs, dec, frame):
         quads = []
         for o in obs:
             color = GREEN if o.in_list else ORANGE
-            if o.source == "OCR" and dec.status in ("none", "seen"):
+            if o.source == "LOCATION":
+                color = BLUE
+            elif o.source == "OCR" and dec.status in ("none", "seen"):
                 color = BLUE
             quads += [(q, color) for q in o.boxes]
         if quads:
             self.view.set_quads(quads)
+        if dec.status == "location":
+            self.set_location(dec.observation.text, source="code")
+            return
         if self.card.state != "idle":
             return
         if dec.status == "seen":
@@ -457,12 +569,8 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ decisions
     def _confirmed(self, number, source, in_list, description, note):
-        if source == "MANUAL":
-            frame = self._last_frame
-        else:
-            frame = getattr(self, "_pending_frame", None)
-        scan = self.store.add(number, description, self.location.text().strip(), source, in_list,
-                              image=frame, note=note)
+        frame = self._last_frame if source == "MANUAL" else self._pending_frame
+        scan = self.store.add(number, description, self.location_text, source, in_list, image=frame, note=note)
         log.info("scan %s %s %s in_list=%s", scan.id, number, source, in_list)
         self.worker.suppress(number)
         self.worker.reset()
@@ -487,9 +595,9 @@ class MainWindow(QMainWindow):
         self._refresh_history()
 
     def _relocate_scan(self, sid: int):
-        text, ok = QInputDialog.getText(self, "Location", "New location for this scan:", text=self.location.text())
-        if ok:
-            self.store.update(sid, location=text.strip())
+        val = LocationPicker.pick(self, self.location_text, self.catalog.locations(), self._recent_locations())
+        if val is not None:
+            self.store.update(sid, location=val)
             self._refresh_history()
 
     def export(self):
@@ -506,6 +614,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"exported {out}", 8000)
 
     def closeEvent(self, ev):
+        self._stats_timer.stop()
         if self.source is not None:
             self.source.stop()
         self.worker.stop()
