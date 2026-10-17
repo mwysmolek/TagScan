@@ -54,6 +54,7 @@ def bench(argv) -> int:
             continue
         sc.reset()
         obs, dec, _ = sc.process(img, force_ocr=True)
+        obs = [x for x in obs if x.number]
         o = next((x for x in obs if x.source != "OCR"), None) or (obs[0] if obs else None)
         t_all += sum(x.elapsed for x in obs) if obs else 0
         if o:

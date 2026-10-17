@@ -29,9 +29,10 @@ def _remove_all(layout, keep_first: int = 0, keep_last: int = 0) -> None:
 
 
 class VideoView(QWidget):
-    """Shows the latest (already downscaled) frame, scaled to fit, with coloured quads on top.
-    A tap emits ``tapped``; a pinch emits ``pinched(scale)``."""
-    tapped = Signal()
+    """Shows the latest (already downscaled) frame, scaled to fit, with coloured quads and the
+    aim box on top. A tap emits ``tapped(fx, fy)`` with the tapped point as fractions of the
+    frame (-1, -1 outside the picture); a pinch emits ``pinched(scale)``."""
+    tapped = Signal(float, float)
     pinched = Signal(float)
 
     def __init__(self, parent=None):
@@ -50,6 +51,8 @@ class VideoView(QWidget):
         self._flash_timer.setSingleShot(True)
         self._flash_timer.timeout.connect(self._end_flash)
         self._press: QPoint | None = None
+        self._box = None                     # (x, y, w, h) in frame coordinates
+        self._box_color = QColor(255, 255, 255, 220)
         self.setStyleSheet("background:#111;")
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents)
         self.grabGesture(Qt.GestureType.PinchGesture)
@@ -67,6 +70,13 @@ class VideoView(QWidget):
 
     def set_text(self, text: str) -> None:
         self._text = text
+        self.update()
+
+    def set_box(self, box, color: QColor | None = None) -> None:
+        """The aim box as an object with x, y, w, h in frame coordinates (None hides it)."""
+        self._box = (box.x, box.y, box.w, box.h) if box is not None else None
+        if color is not None:
+            self._box_color = color
         self.update()
 
     def flash(self, color: QColor, ms: int = 350) -> None:
@@ -88,8 +98,23 @@ class VideoView(QWidget):
 
     def mouseReleaseEvent(self, ev):
         if self._press is not None and (ev.position().toPoint() - self._press).manhattanLength() < 24:
-            self.tapped.emit()
+            self.tapped.emit(*self.frame_point(ev.position().x(), ev.position().y()))
         self._press = None
+
+    def _geometry(self):
+        """(scale, ox, oy, dw, dh) of the drawn picture inside the widget."""
+        sw, sh = self._src
+        s = min(self.width() / sw, self.height() / sh)
+        dw, dh = sw * s, sh * s
+        return s, (self.width() - dw) / 2, (self.height() - dh) / 2, dw, dh
+
+    def frame_point(self, wx: float, wy: float) -> tuple[float, float]:
+        """Widget point -> fractions of the frame, (-1, -1) when outside the picture."""
+        if self._img is None:
+            return -1.0, -1.0
+        s, ox, oy, dw, dh = self._geometry()
+        fx, fy = (wx - ox) / dw, (wy - oy) / dh
+        return (fx, fy) if 0 <= fx <= 1 and 0 <= fy <= 1 else (-1.0, -1.0)
 
     def event(self, ev):
         if ev.type() == QEvent.Type.Gesture:
@@ -113,13 +138,27 @@ class VideoView(QWidget):
             p.setPen(GREY)
             p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self._text or "no camera")
             return
-        sw, sh = self._src
-        s = min(self.width() / sw, self.height() / sh)
-        dw, dh = sw * s, sh * s
-        ox, oy = (self.width() - dw) / 2, (self.height() - dh) / 2
+        s, ox, oy, dw, dh = self._geometry()
         target = QRectF(ox, oy, dw, dh)
         p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
         p.drawImage(target, self._img)
+        if self._box is not None:
+            bx, by, bw, bh = self._box
+            r = QRectF(ox + bx * s, oy + by * s, bw * s, bh * s)
+            # dim everything outside the box, then corner brackets
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(0, 0, 0, 90))
+            p.drawRect(QRectF(ox, oy, dw, r.top() - oy))
+            p.drawRect(QRectF(ox, r.bottom(), dw, oy + dh - r.bottom()))
+            p.drawRect(QRectF(ox, r.top(), r.left() - ox, r.height()))
+            p.drawRect(QRectF(r.right(), r.top(), ox + dw - r.right(), r.height()))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(self._box_color, 4))
+            arm = max(12.0, min(r.width(), r.height()) * 0.2)
+            for cx, dx in ((r.left(), 1), (r.right(), -1)):
+                for cy, dy in ((r.top(), 1), (r.bottom(), -1)):
+                    p.drawLine(QPointF(cx, cy), QPointF(cx + dx * arm, cy))
+                    p.drawLine(QPointF(cx, cy), QPointF(cx, cy + dy * arm))
         for quad, color in self._quads:
             p.setPen(QPen(color, 3))
             p.drawPolygon(QPolygonF([QPointF(ox + x * s, oy + y * s) for x, y in quad]))
@@ -135,37 +174,52 @@ class VideoView(QWidget):
             p.drawText(QRectF(ox + 8, oy + dh - 28, dw - 16, 28), Qt.AlignmentFlag.AlignVCenter, self._text)
 
 
+ALNUM_ROWS = (("1", "2", "3", "4", "5", "6", "7", "8", "9", "0"),
+              ("q", "w", "e", "r", "t", "z", "u", "i", "o", "p"),
+              ("a", "s", "d", "f", "g", "h", "j", "k", "l", "clear"),
+              ("y", "x", "c", "v", "b", "n", "m", "-", "⌫", "✓"))
+
+
 class NumberPad(QWidget):
-    """Digits, backspace and enter as finger-sized buttons that edit an attached QLineEdit.
-    ``entered`` fires on the tick key. Extra keys (e.g. "-", " ") can be added for locations."""
+    """Finger-sized keys that edit an attached QLineEdit. Default: a 3x4 number pad with
+    backspace and enter; ``extra`` adds a row (e.g. "-", " "); ``rows`` replaces the layout
+    altogether (see ``ALNUM_ROWS`` for digits plus a QWERTZ letter block, for codes such as
+    ``123ab``). ``entered`` fires on the tick key."""
     entered = Signal()
 
-    def __init__(self, parent=None, extra: tuple[str, ...] = (), height: int = TOUCH):
+    def __init__(self, parent=None, extra: tuple[str, ...] = (), height: int = TOUCH, rows=None):
         super().__init__(parent)
         self.target: QLineEdit | None = None
         g = QGridLayout(self)
         g.setContentsMargins(0, 0, 0, 0)
         g.setSpacing(6)
-        keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "⌫", "0", "✓"]
-        for i, k in enumerate(keys):
-            g.addWidget(self._key(k, height), i // 3, i % 3)
-        if extra:
-            row = QHBoxLayout()
-            row.setSpacing(6)
-            for k in extra:
-                row.addWidget(self._key(k, height))
-            g.addLayout(row, 4, 0, 1, 3)
+        if rows is None:
+            rows = (("1", "2", "3"), ("4", "5", "6"), ("7", "8", "9"), ("⌫", "0", "✓"))
+            if extra:
+                rows = rows + (tuple(extra),)
+        ncol = max(len(r) for r in rows)
+        for r, keys in enumerate(rows):
+            if len(keys) == ncol:
+                for c, k in enumerate(keys):
+                    g.addWidget(self._key(k, height), r, c)
+            else:                                   # a shorter row spans the full width
+                row = QHBoxLayout()
+                row.setSpacing(6)
+                for k in keys:
+                    row.addWidget(self._key(k, height))
+                g.addLayout(row, r, 0, 1, ncol)
 
     def _key(self, k: str, height: int) -> QPushButton:
         label = {" ": "space", "⌫": "⌫", "✓": "✓"}.get(k, k)
         b = QPushButton(label)
         b.setMinimumHeight(height)
+        b.setMinimumWidth(height)
         b.setFocusPolicy(Qt.FocusPolicy.NoFocus)          # never steal the keyboard focus
-        style = "font-size:20px;border-radius:8px;"
+        style = "font-size:20px;border-radius:8px;padding:0 4px;"
         if k == "✓":
             style += "background:#2ea043;color:white;font-weight:600;"
-        elif k == "⌫":
-            style += "background:#eee;"
+        elif k in ("⌫", "clear"):
+            style += "background:#eee;font-size:16px;"
         b.setStyleSheet(style)
         b.clicked.connect(lambda _=False, k=k: self._press(k))
         return b
@@ -189,9 +243,10 @@ class NumberPad(QWidget):
 class ResultCard(QFrame):
     """Idle -> (seen) -> accept with countdown | review with buttons -> idle.
     The number pad under the card types a number without a keyboard."""
-    confirmed = Signal(str, str, bool, str, str)   # number, source, in_list, description, note
-    skipped = Signal(str)                          # number
-    undone = Signal(str)                           # number
+    confirmed = Signal(str, str, bool, str, str, str)   # number, source, in_list, description, note, outcome
+    skipped = Signal(str)                          # number (Skip on a review card)
+    undone = Signal(str)                           # number (Undo on a green card)
+    backed = Signal(str)                           # Back on the "type it" screen (prior number)
     state_changed = Signal(str)
 
     def __init__(self, parent=None):
@@ -200,6 +255,7 @@ class ResultCard(QFrame):
         self.setObjectName("card")
         self.setMinimumWidth(340)
         self.state = "idle"
+        self.idle_message = "Point the camera at a label"      # the window may replace it (e.g. "set the operator")
         self.pending: dict | None = None
         self._seconds = 3.0
         self._remaining = 0.0
@@ -227,6 +283,11 @@ class ResultCard(QFrame):
         self.bar.setTextVisible(False)
         self.bar.setFixedHeight(10)
         self.bar.hide()
+        self.pic = QLabel()                      # the box content, so the operator can read it
+        self.pic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.pic.setStyleSheet("background:#222;border-radius:6px;")
+        self.pic.setMinimumHeight(120)
+        self.pic.hide()
 
         self.alts = QWidget()
         self.alts_lay = QGridLayout(self.alts)
@@ -266,6 +327,7 @@ class ResultCard(QFrame):
         lay.addWidget(self.desc)
         lay.addWidget(self.meta)
         lay.addWidget(self.bar)
+        lay.addWidget(self.pic)
         lay.addWidget(self.alts)
         lay.addStretch(1)
         lay.addLayout(btns)
@@ -281,19 +343,22 @@ class ResultCard(QFrame):
         self.set_idle()
 
     # ------------------------------------------------------------------ states
-    def set_idle(self, msg: str = "Point the camera at a label"):
+    def set_idle(self, msg: str | None = None):
         self.state = "idle"
         self.pending = None
         self._timer.stop()
         self.state_changed.emit("idle")
-        self.head.setText(msg)
+        self.head.setText(self.idle_message if msg is None else msg)
         self.number.setText("")
         self.desc.setText("")
         self.meta.setText("")
         self.bar.hide()
+        self.pic.hide()
+        self.pic.clear()
         self._clear_alts()
         self.ok_btn.hide()
         self.skip_btn.hide()
+        self.skip_btn.setText("Skip")
         self.undo_btn.hide()
         self.pad.show()
         self.setStyleSheet("QFrame#card{background:#fafafa;border:1px solid #ddd;border-radius:10px;}")
@@ -315,6 +380,7 @@ class ResultCard(QFrame):
         self.desc.setText(description)
         self.meta.setText(note)
         self._clear_alts()
+        self.pic.hide()
         self.bar.show()
         self._seconds = max(0.05, seconds)
         self._remaining = self._seconds
@@ -326,7 +392,7 @@ class ResultCard(QFrame):
         self.setStyleSheet("QFrame#card{background:#e9f7ec;border:2px solid #2ea043;border-radius:10px;}")
         self._timer.start()
 
-    def set_review(self, number, description, source, in_list, reason, nearest=()):
+    def set_review(self, number, description, source, in_list, reason, nearest=(), image=None):
         self.state = "review"
         self.state_changed.emit("review")
         self.pending = dict(number=number, description=description, source=source, in_list=in_list, note=reason)
@@ -337,6 +403,54 @@ class ResultCard(QFrame):
         self.meta.setText("tap a suggestion, OK to keep as read, or type the number")
         self.bar.hide()
         self._timer.stop()
+        self._show_pic(image)
+        self._set_alts(nearest)
+        self.ok_btn.show()
+        self.skip_btn.show()
+        self.skip_btn.setText("Skip")
+        self.undo_btn.hide()
+        self.pad.show()
+        self.setStyleSheet("QFrame#card{background:#fff4e5;border:2px solid #f08c00;border-radius:10px;}")
+
+    def set_input(self, image, prior: str = "", reason: str = "unreadable", nearest=()):
+        """The "type it" screen: OCR gave up on a steady box, or the operator undid a read.
+        Shows the box content, suggestions, and the pad; Back returns to idle."""
+        self.state = "input"
+        self.state_changed.emit("input")
+        self.pending = dict(number=prior, description="", source="MANUAL", in_list=False, note=reason)
+        if reason == "undo":
+            self.head.setText("Wrong read  ·  type the right number")
+        else:
+            self.head.setText("Could not read the label  ·  type the number")
+        self.number.setText(prior or "")
+        self.number.setStyleSheet("font-size:44px;font-weight:700;color:#999;")
+        self.desc.setText("")
+        self.meta.setText("tap a suggestion or type the number on the pad; Back if there is nothing to add")
+        self.bar.hide()
+        self._timer.stop()
+        self._show_pic(image)
+        self._set_alts(nearest)
+        self.ok_btn.hide()
+        self.skip_btn.setText("Back")
+        self.skip_btn.show()
+        self.undo_btn.hide()
+        self.pad.show()
+        self.manual.setFocus()
+        self.setStyleSheet("QFrame#card{background:#eef3fb;border:2px solid #3c8ce6;border-radius:10px;}")
+
+    def _show_pic(self, image) -> None:
+        if image is None or image.isNull():
+            self.pic.hide()
+            self.pic.clear()
+            return
+        from PySide6.QtGui import QPixmap
+        w = max(200, self.width() - 40)
+        pm = QPixmap.fromImage(image).scaled(w, 220, Qt.AspectRatioMode.KeepAspectRatio,
+                                             Qt.TransformationMode.SmoothTransformation)
+        self.pic.setPixmap(pm)
+        self.pic.show()
+
+    def _set_alts(self, nearest) -> None:
         self._clear_alts()
         for i, it in enumerate(list(nearest)[:4]):
             b = QPushButton(f"{it.number}\n{it.description[:34]}")
@@ -344,11 +458,6 @@ class ResultCard(QFrame):
             b.setStyleSheet("text-align:left;font-size:13px;border-radius:6px;")
             b.clicked.connect(lambda _=False, it=it: self._choose(it))
             self.alts_lay.addWidget(b, i // 2, i % 2)
-        self.ok_btn.show()
-        self.skip_btn.show()
-        self.undo_btn.hide()
-        self.pad.show()
-        self.setStyleSheet("QFrame#card{background:#fff4e5;border:2px solid #f08c00;border-radius:10px;}")
 
     # ------------------------------------------------------------------ actions
     def _tick(self):
@@ -356,19 +465,21 @@ class ResultCard(QFrame):
         self.bar.setValue(int(max(0.0, self._remaining / self._seconds) * 1000))
         if self._remaining <= 0:
             self._timer.stop()
-            self._ok()
+            self._ok("accepted")
 
-    def _ok(self):
-        if not self.pending:
+    def _ok(self, outcome: str = ""):
+        if not self.pending or self.state == "input":
             return
         p = self.pending
+        outcome = outcome or ("accepted" if self.state == "accept" else "confirmed")
         self.set_idle()
-        self.confirmed.emit(p["number"], p["source"], p["in_list"], p["description"], p.get("note", ""))
+        self.confirmed.emit(p["number"], p["source"], p["in_list"], p["description"], p.get("note", ""), outcome)
 
     def _skip(self):
         n = self.pending["number"] if self.pending else ""
+        was_input = self.state == "input"
         self.set_idle()
-        self.skipped.emit(n)
+        (self.backed if was_input else self.skipped).emit(n)
 
     def _undo(self):
         n = self.pending["number"] if self.pending else ""
@@ -378,8 +489,12 @@ class ResultCard(QFrame):
     def _choose(self, it):
         if not self.pending:
             return
-        self.pending.update(number=it.key, description=it.description, in_list=True, note="corrected")
-        self._ok()
+        note = self.pending.get("note", "") if self.state == "input" else "corrected"
+        self.pending.update(number=it.key, description=it.description, in_list=True, note=note, source="MANUAL"
+                            if self.state == "input" else self.pending["source"])
+        p = self.pending
+        self.set_idle()
+        self.confirmed.emit(p["number"], p["source"], p["in_list"], p["description"], p["note"], "corrected")
 
     def _manual(self):
         text = self.manual.text().strip()
@@ -389,8 +504,9 @@ class ResultCard(QFrame):
         in_list, description = False, ""
         if self.lookup:
             in_list, description, _ = self.lookup(text)
+        note = self.pending.get("note", "") if (self.pending and self.state == "input") else ""
         self.set_idle()
-        self.confirmed.emit(text, "MANUAL", in_list, description, "")
+        self.confirmed.emit(text, "MANUAL", in_list, description, note, "typed")
 
     def _clear_alts(self):
         _remove_all(self.alts_lay)
@@ -398,12 +514,12 @@ class ResultCard(QFrame):
     def keyPressEvent(self, ev):
         key, text = ev.key(), ev.text()
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self.state in ("accept", "review"):
-            self._ok()
+            self._ok("confirmed")
         elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self.manual.text().strip():
             self._manual()
         elif key == Qt.Key.Key_Escape and self.state == "accept":
             self._undo()
-        elif key == Qt.Key.Key_Escape and self.state == "review":
+        elif key == Qt.Key.Key_Escape and self.state in ("review", "input"):
             self._skip()
         elif text.isdigit():                          # a hardware keyboard types into the number field
             self.manual.insert(text)
@@ -413,13 +529,19 @@ class ResultCard(QFrame):
             super().keyPressEvent(ev)
 
 
-class LocationPicker(QDialog):
-    """Pick the scanning location with a finger: recent and list locations as big buttons, a
-    number pad for room numbers, and a text field for the rare case a keyboard is at hand."""
+class TextPicker(QDialog):
+    """Pick a short text (the location, the operator) with a finger: choices and recent values
+    as big buttons, a number pad for room or staff numbers, and a text field for the rare
+    case a keyboard is at hand."""
 
-    def __init__(self, parent=None, current: str = "", choices=(), recent=()):
+    def __init__(self, parent=None, current: str = "", choices=(), recent=(), title: str = "Location",
+                 tap_hint: str = "Tap a location", placeholder: str = "room / hall",
+                 code_hint: str = "Or scan a location code: a QR code reading  LOC: <name>  switches the "
+                                  "location without touching the screen.",
+                 empty_hint: str = "No locations yet. Type one on the right, or give the list a\n"
+                                   "location column (profile: list.location_column) to see them here."):
         super().__init__(parent)
-        self.setWindowTitle("Location")
+        self.setWindowTitle(title)
         self.setModal(True)
         self.resize(940, 640)
         root = QHBoxLayout(self)
@@ -427,9 +549,9 @@ class LocationPicker(QDialog):
 
         # left: the choices
         left = QVBoxLayout()
-        title = QLabel("Tap a location")
-        title.setStyleSheet("font-size:15px;color:#555;")
-        left.addWidget(title)
+        title_lbl = QLabel(tap_hint)
+        title_lbl.setStyleSheet("font-size:15px;color:#555;")
+        left.addWidget(title_lbl)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -458,8 +580,7 @@ class LocationPicker(QDialog):
         scroll.setWidget(inner)
         left.addWidget(scroll, 1)
         if not seen:
-            empty = QLabel("No locations yet. Type one on the right, or give the list a\n"
-                           "location column (profile: list.location_column) to see them here.")
+            empty = QLabel(empty_hint)
             empty.setStyleSheet("color:#777;")
             left.addWidget(empty)
         root.addLayout(left, 3)
@@ -467,7 +588,7 @@ class LocationPicker(QDialog):
         # right: type it
         right = QVBoxLayout()
         self.edit = QLineEdit(current)
-        self.edit.setPlaceholderText("room / hall")
+        self.edit.setPlaceholderText(placeholder)
         self.edit.setMinimumHeight(56)
         self.edit.setStyleSheet("font-size:24px;")
         right.addWidget(self.edit)
@@ -475,8 +596,7 @@ class LocationPicker(QDialog):
         self.pad.attach(self.edit)
         self.pad.entered.connect(self.accept)
         right.addWidget(self.pad)
-        hint = QLabel("Or scan a location code: a QR code reading  LOC: <name>  switches the location "
-                      "without touching the screen.")
+        hint = QLabel(code_hint)
         hint.setWordWrap(True)
         hint.setStyleSheet("font-size:12px;color:#777;")
         right.addWidget(hint)
@@ -504,8 +624,106 @@ class LocationPicker(QDialog):
         return self.edit.text().strip()
 
     @classmethod
-    def pick(cls, parent, current: str, choices=(), recent=()) -> str | None:
-        dlg = cls(parent, current, choices, recent)
+    def pick(cls, parent, current: str, choices=(), recent=(), **kw) -> str | None:
+        dlg = cls(parent, current, choices, recent, **kw)
+        return dlg.value() if dlg.exec() == QDialog.DialogCode.Accepted else None
+
+
+class LocationPicker(TextPicker):
+    """The location picker (TextPicker with its default texts)."""
+
+
+class OperatorPicker(QDialog):
+    """Who is scanning: the person types their own short code (e.g. ``123ab``) on a
+    digits-and-letters pad. Recent codes and any names from the profile are one tap. An
+    optional ``pattern`` (regex from the profile) keeps typos out."""
+
+    def __init__(self, parent=None, current: str = "", choices=(), recent=(), pattern: str = ""):
+        super().__init__(parent)
+        import re
+        self.setWindowTitle("Operator")
+        self.setModal(True)
+        self.resize(640, 560)
+        self._rx = re.compile(pattern, re.I) if pattern else None
+        v = QVBoxLayout(self)
+        v.setSpacing(10)
+        title = QLabel("Who is scanning?  Enter your code")
+        title.setStyleSheet("font-size:16px;color:#555;")
+        v.addWidget(title)
+        self.edit = QLineEdit(current)
+        self.edit.setPlaceholderText("your code, e.g. 123ab")
+        self.edit.setMinimumHeight(60)
+        self.edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.edit.setStyleSheet("font-size:28px;letter-spacing:2px;")
+        v.addWidget(self.edit)
+        seen: list[str] = []
+        for r in list(recent) + list(choices):
+            r = str(r).strip()
+            if r and r not in seen:
+                seen.append(r)
+        if seen:
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            lbl = QLabel("recent:")
+            lbl.setStyleSheet("color:#777;")
+            row.addWidget(lbl)
+            for name in seen[:6]:
+                b = QPushButton(name)
+                b.setMinimumHeight(TOUCH)
+                b.setStyleSheet("font-size:16px;border-radius:8px;border:2px solid #3c8ce6;padding:0 12px;")
+                b.clicked.connect(lambda _=False, n=name: self._choose(n))
+                row.addWidget(b)
+            row.addStretch(1)
+            v.addLayout(row)
+        self.pad = NumberPad(rows=ALNUM_ROWS, height=50)
+        self.pad.attach(self.edit)
+        self.pad.entered.connect(self.accept)
+        v.addWidget(self.pad)
+        self.hint = QLabel("")
+        self.hint.setStyleSheet("font-size:12px;color:#b35c00;")
+        v.addWidget(self.hint)
+        v.addStretch(1)
+        btns = QHBoxLayout()
+        self.ok = QPushButton("OK  ✓")
+        self.ok.setMinimumHeight(60)
+        self.ok.setStyleSheet("font-size:20px;font-weight:600;background:#2ea043;color:white;border-radius:8px;")
+        self.ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.setMinimumHeight(60)
+        cancel.setStyleSheet("font-size:18px;border-radius:8px;")
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(self.ok, 2)
+        btns.addWidget(cancel, 1)
+        v.addLayout(btns)
+        self.edit.textChanged.connect(self._validate)
+        self.edit.returnPressed.connect(self.accept)
+        self._validate(self.edit.text())
+
+    def valid(self, text: str | None = None) -> bool:
+        text = (self.edit.text() if text is None else text).strip()
+        return bool(text) and (self._rx is None or self._rx.fullmatch(text) is not None)
+
+    def _validate(self, text: str) -> None:
+        ok = self.valid(text)
+        self.ok.setEnabled(ok)
+        self.hint.setText("" if ok or not text.strip() else "that does not look like a valid code")
+        self.edit.setStyleSheet("font-size:28px;letter-spacing:2px;" + ("" if ok or not text.strip() else "border:2px solid #f08c00;"))
+
+    def accept(self) -> None:
+        if self.valid():
+            super().accept()
+
+    def _choose(self, name: str) -> None:
+        self.edit.setText(name)
+        if self.valid():
+            super().accept()
+
+    def value(self) -> str:
+        return self.edit.text().strip()
+
+    @classmethod
+    def pick(cls, parent, current: str, choices=(), recent=(), pattern: str = "") -> str | None:
+        dlg = cls(parent, current, choices, recent, pattern)
         return dlg.value() if dlg.exec() == QDialog.DialogCode.Accepted else None
 
 
