@@ -196,7 +196,8 @@ def test_mailbox_drops_instead_of_queueing(app):
     t.join()
     QCoreApplication.processEvents()
     assert received and all(s == (48, 64, 3) for s in received)
-    assert src.dropped > 0 and src.delivered == len(received)
+    assert src.delivered == len(received)
+    assert src.dropped > 0, "no frame was dropped: is the rate cap swallowing calls (coarse clock)?"
     assert src.delivered + src.dropped <= n
     assert src.delivered < n // 2, "frames were queued rather than dropped"
     assert src._latest is None and not src._wake_pending
