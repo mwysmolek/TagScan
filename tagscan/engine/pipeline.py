@@ -76,6 +76,10 @@ class Scanner:
         with self._lock:
             self._streak_number, self._streak = "", 0
 
+    def is_suppressed(self, number: str) -> bool:
+        """For the window: a result decoded before a suppression was set may still be in flight."""
+        return self._is_suppressed(number)
+
     def _is_suppressed(self, number: str) -> bool:
         exp = self._suppressed.get(number)
         if exp is None:

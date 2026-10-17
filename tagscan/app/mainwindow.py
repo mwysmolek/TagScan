@@ -688,6 +688,10 @@ class MainWindow(QMainWindow):
         if dec.status == "operator":
             self.set_operator(dec.observation.text, source="code")
             return
+        if dec.status in ("seen", "accept", "review") and dec.observation is not None and dec.observation.number:
+            sc = self.worker.scanner
+            if sc is not None and sc.is_suppressed(dec.observation.number):
+                return          # decoded before the confirm/skip that suppressed this number; stale
         if (self.card.state == "input" and dec.status in ("accept", "review")
                 and dec.observation is not None and dec.observation.source in ("QR", "BARCODE")):
             self.card.set_idle()            # a code resolves what the text read could not
