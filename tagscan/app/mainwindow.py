@@ -152,7 +152,7 @@ class ScanWorker:
     def submit(self, frame, force: bool = False) -> None:
         """Hand a frame to the decoders. Codes run at most every ``code_interval``; the OCR
         thread throttles itself by ``ocr_interval``. Both mailboxes keep only the newest frame."""
-        now = time.monotonic()
+        now = time.perf_counter()
         if force or now - self._last_code >= self.profile.code_interval:
             self._last_code = now
             self.codes.q.put(frame)

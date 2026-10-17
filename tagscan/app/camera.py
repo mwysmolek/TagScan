@@ -270,7 +270,7 @@ class CameraSource(FrameSource):
 
     # -- capture thread ----------------------------------------------------------------------
     def _on_sink_frame(self, frame: QVideoFrame) -> None:
-        now = time.monotonic()
+        now = time.perf_counter()           # not monotonic(): 15.6 ms ticks on Windows before Python 3.13
         if not frame.isValid() or now - self._last_conv < self.min_interval:
             return
         with self._lock:
