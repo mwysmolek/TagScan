@@ -76,11 +76,11 @@ def test_ocr_synthetic(tmp_path):
 def test_location_code_regex():
     p = TextParser(Profile())
     assert p.parse_location("LOC: Hall 3") == "Hall 3"
-    assert p.parse_location("ort=Labor 6\n") == "Labor 6"
+    assert p.parse_location("ort=Lab A\n") == "Lab A"
     assert p.parse_location("STANDORT:\n204") == "204"
     assert p.parse_location("Inventar-Nr.\n28019") == ""
     assert p.parse_location("") == ""
-    assert p.parse_code("LOC: 6200") == "6200"       # parse_code alone would read it as a number ...
+    assert p.parse_code("LOC: 4711") == "4711"       # parse_code alone would read it as a number ...
 
 
 def test_location_code_wins_in_pipeline():
@@ -100,28 +100,28 @@ def test_location_code_wins_in_pipeline():
         img = cv2.copyMakeBorder(img, 40, 40, 40, 40, cv2.BORDER_CONSTANT, value=255)
         return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
-    cat = Catalog(items={"6200": Item("6200", "6200", "the item")})
+    cat = Catalog(items={"4711": Item("4711", "4711", "the item")})
     sc = Scanner(Profile(), cat)
     assert formats_from_names(Profile().code_formats) is not None
 
-    obs, dec = sc.process_codes(qr("LOC: 6200"))
-    assert dec.status == "location" and dec.observation.text == "6200" and obs[0].source == "LOCATION"
-    obs, dec = sc.process_codes(qr("LOC: 6200"))           # the same code again is quiet for a while
+    obs, dec = sc.process_codes(qr("LOC: 4711"))
+    assert dec.status == "location" and dec.observation.text == "4711" and obs[0].source == "LOCATION"
+    obs, dec = sc.process_codes(qr("LOC: 4711"))           # the same code again is quiet for a while
     assert dec.status == "none" and obs and obs[0].source == "LOCATION"
 
-    obs, dec = sc.process_codes(qr("6200"))                 # a plain number is still an item
-    assert dec.status == "accept" and dec.observation.number == "6200" and dec.observation.in_list
-    obs, dec = sc.process_codes(qr("Some Brand\nInventar-Nr.\n4711\nthing"))
-    assert dec.status == "review" and dec.observation.number == "4711"
+    obs, dec = sc.process_codes(qr("4711"))                 # a plain number is still an item
+    assert dec.status == "accept" and dec.observation.number == "4711" and dec.observation.in_list
+    obs, dec = sc.process_codes(qr("Some Brand\nAsset No.\n5555\nthing"))
+    assert dec.status == "review" and dec.observation.number == "5555"
 
 
 def test_catalog_locations(tmp_path):
     f = tmp_path / "list.csv"
-    f.write_text("Nr;Description;Ort\n28019;Servicewagen;Halle 10\n100016;Monitor;Halle 2\n100017;Maus;Halle 2\n100018;x;\n",
+    f.write_text("No;Description;Location\n1001;Cart;Hall 10\n1002;Monitor;Hall 2\n1003;Mouse;Hall 2\n1004;x;\n",
                  encoding="utf-8")
     cat = Catalog.load(f, ListSpec(description_columns=[2], location_column=3))
-    assert cat.get("28019").location == "Halle 10"
-    assert cat.locations() == ["Halle 2", "Halle 10"]          # natural order, distinct, blanks dropped
+    assert cat.get("1001").location == "Hall 10"
+    assert cat.locations() == ["Hall 2", "Hall 10"]          # natural order, distinct, blanks dropped
     assert Catalog.load(f, ListSpec()).locations() == []
 
 
