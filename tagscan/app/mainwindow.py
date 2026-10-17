@@ -22,7 +22,7 @@ from ..store import Store
 from .aim import Box, Stability, box_rect, crop_box
 from .camera import CameraSource, FolderSource, bgr_to_qimage
 from .sysinfo import rss_mb
-from .widgets import GREEN, ORANGE, BLUE, HistoryStrip, LocationPicker, ResultCard, VideoView, TOUCH
+from .widgets import GREEN, ORANGE, BLUE, HistoryStrip, LocationPicker, OperatorPicker, ResultCard, VideoView, TOUCH
 
 log = logging.getLogger("tagscan")
 
@@ -227,6 +227,7 @@ class MainWindow(QMainWindow):
         self.catalog = catalog or Catalog()
         self.source = None
         self.location_text = str(self.settings.value("location", "") or "")
+        self.operator_text = str(self.settings.value("operator", "") or "")
         self._zoom = 1.0
         self._last_frame = None
         self._frames = 0
@@ -277,10 +278,14 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.sheet_box)
         tb.addSeparator()
         self.loc_btn = QPushButton()
-        self.loc_btn.setMinimumWidth(260)
+        self.loc_btn.setMinimumWidth(240)
         self.loc_btn.setStyleSheet("font-weight:600;text-align:left;")
         self.loc_btn.clicked.connect(self.pick_location)
         tb.addWidget(self.loc_btn)
+        self.op_btn = QPushButton()
+        self.op_btn.setMinimumWidth(200)
+        self.op_btn.clicked.connect(self.pick_operator)
+        tb.addWidget(self.op_btn)
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         tb.addWidget(spacer)
@@ -359,6 +364,7 @@ class MainWindow(QMainWindow):
         self._refresh_history()
         self._set_zoom(float(self.settings.value("zoom", 10)) / 10.0, save=False)
         self._show_location()
+        self._show_operator()
 
         force = QAction("force OCR now", self)
         force.setShortcut(QKeySequence(Qt.Key.Key_Space))
@@ -453,6 +459,44 @@ class MainWindow(QMainWindow):
         val = LocationPicker.pick(self, self.location_text, self.catalog.locations(), self._recent_locations())
         if val is not None:
             self.set_location(val)
+
+    # ------------------------------------------------------------------ operator
+    def _recent_operators(self) -> list[str]:
+        v = self.settings.value("recent_operators", [])
+        if isinstance(v, str):
+            v = [v] if v else []
+        return [str(x) for x in (v or []) if str(x).strip()]
+
+    def _show_operator(self):
+        if self.operator_text:
+            self.op_btn.setText(f"Operator: {self.operator_text}")
+            self.op_btn.setStyleSheet("font-weight:600;text-align:left;")
+        else:
+            self.op_btn.setText("Operator: —  (tap: who is scanning?)")
+            self.op_btn.setStyleSheet("font-weight:600;text-align:left;border:2px solid #f08c00;")
+        self.card.idle_message = ("Point the camera at a label" if self.operator_text
+                                  else "Set the operator first (button above), then point the camera at a label")
+        if self.card.state == "idle":
+            self.card.head.setText(self.card.idle_message)
+
+    def set_operator(self, text: str, source: str = "") -> None:
+        text = (text or "").strip()
+        self.operator_text = text
+        self.settings.setValue("operator", text)
+        if text:
+            recent = [text] + [r for r in self._recent_operators() if r != text]
+            self.settings.setValue("recent_operators", recent[:12])
+        self._show_operator()
+        if source == "code":
+            self.statusBar().showMessage(f"operator set by badge: {text}", 4000)
+            self.view.set_text(f"operator: {text}")
+            self.view.flash(BLUE, 600)
+        log.info("operator %r (%s)", text, source or "picked")
+
+    def pick_operator(self):
+        val = OperatorPicker.pick(self, self.operator_text, list(self.profile.operators), self._recent_operators())
+        if val is not None:
+            self.set_operator(val)
 
     # ------------------------------------------------------------------ sources
     def set_source(self, source):
@@ -630,7 +674,7 @@ class MainWindow(QMainWindow):
         quads = []
         for o in obs:
             color = GREEN if o.in_list else ORANGE
-            if o.source == "LOCATION":
+            if o.source in ("LOCATION", "OPERATOR"):
                 color = BLUE
             elif o.source == "OCR" and dec.status in ("none", "seen"):
                 color = BLUE
@@ -639,6 +683,9 @@ class MainWindow(QMainWindow):
             self.view.set_quads(quads)
         if dec.status == "location":
             self.set_location(dec.observation.text, source="code")
+            return
+        if dec.status == "operator":
+            self.set_operator(dec.observation.text, source="code")
             return
         if (self.card.state == "input" and dec.status in ("accept", "review")
                 and dec.observation is not None and dec.observation.source in ("QR", "BARCODE")):
@@ -731,7 +778,7 @@ class MainWindow(QMainWindow):
                                 ocr_level=ctx.get("ocr_level", ""), ocr_boxes=ctx.get("ocr_boxes"),
                                 roi=ctx.get("roi"), in_list=in_list, crop=ctx.get("crop"),
                                 frame=None if photo else ctx.get("frame", self._last_frame), photo=photo,
-                                location=self.location_text, scan_id=scan_id)
+                                location=self.location_text, scan_id=scan_id, operator=self.operator_text)
         except Exception:
             log.exception("training record failed")
 
@@ -741,8 +788,12 @@ class MainWindow(QMainWindow):
         frame = ctx.get("frame")
         if frame is None:
             frame = self._last_frame
-        scan = self.store.add(number, description, self.location_text, source, in_list, image=frame, note=note)
-        log.info("scan %s %s %s in_list=%s outcome=%s", scan.id, number, source, in_list, outcome)
+        scan = self.store.add(number, description, self.location_text, source, in_list, image=frame, note=note,
+                              operator=self.operator_text)
+        log.info("scan %s %s %s in_list=%s outcome=%s by %r at %r", scan.id, number, source, in_list, outcome,
+                 self.operator_text, self.location_text)
+        if not self.operator_text:
+            self.statusBar().showMessage("stored without an operator: tap the Operator button", 6000)
         self._record(outcome, final_number=number, source=source, in_list=in_list, photo=scan.photo, scan_id=scan.id)
         self._ctx = {}
         self._need_change = True
@@ -751,6 +802,7 @@ class MainWindow(QMainWindow):
         self.worker.reset()
         self._refresh_history()
         self.view.flash(GREEN if in_list else ORANGE, 500)
+        self._show_operator()
 
     def _skipped(self, number):
         self._record("skipped", final_number="", source=self._ctx.get("source", "") if self._ctx else "")
@@ -779,6 +831,7 @@ class MainWindow(QMainWindow):
         self._need_change = True
         self._stab.mark_read()
         self.worker.reset()
+        self._show_operator()
 
     def _refresh_history(self):
         self.history.set_scans(self.store.recent(10))
@@ -797,7 +850,7 @@ class MainWindow(QMainWindow):
             self._refresh_history()
 
     def export(self):
-        default = str(self.data_dir / self.store.default_export_name())
+        default = str(self.data_dir / self.store.default_export_name(self.operator_text))
         path, _ = QFileDialog.getSaveFileName(self, "Export scans", default, "Excel (*.xlsx)")
         if not path:
             return

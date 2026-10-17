@@ -9,7 +9,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QLineEdit
 from PySide6.QtTest import QTest
 
-from tagscan.app.widgets import LocationPicker, NumberPad, ResultCard
+from tagscan.app.widgets import LocationPicker, NumberPad, OperatorPicker, ResultCard
 from tagscan.catalog import Item
 
 
@@ -107,3 +107,12 @@ def test_location_picker_choice_and_pad(app):
         dlg.pad._press(k)
     QTimer.singleShot(0, lambda: dlg.pad._press("✓"))
     assert dlg.exec() == dlg.DialogCode.Accepted and dlg.value() == "204"
+
+
+def test_operator_picker(app):
+    dlg = OperatorPicker(None, "", choices=["Anna", "Ben"], recent=["Ben"])
+    assert dlg.windowTitle() == "Operator"
+    buttons = [b for b in dlg.findChildren(type(dlg.pad._key("x", 1))) if b.text() in ("Anna", "Ben")]
+    assert [b.text() for b in buttons] == ["Ben", "Anna"]
+    QTimer.singleShot(0, lambda: buttons[1].click())
+    assert dlg.exec() == dlg.DialogCode.Accepted and dlg.value() == "Anna"

@@ -29,7 +29,7 @@ class Observation:
 
 @dataclass
 class Decision:
-    status: str = "none"        # none | seen | accept | review | location
+    status: str = "none"        # none | seen | accept | review | location | operator
     observation: Observation | None = None
     votes: int = 0
     message: str = ""
@@ -85,6 +85,21 @@ class Scanner:
             return False
         return True
 
+    def _special_code(self, hit):
+        """``LOC: Hall 3`` / ``OP: Anna`` payloads: (observation, decision) with the decision
+        None while the same code is still being suppressed; None for an ordinary code."""
+        for kind, value in (("location", self.parser.parse_location(hit.text)),
+                            ("operator", self.parser.parse_operator(hit.text))):
+            if not value:
+                continue
+            o = Observation(source=kind.upper(), number="", text=value, in_list=True, boxes=[hit.quad])
+            key = f"\x00{kind}:{value}"
+            if self._is_suppressed(key):
+                return o, None
+            self._suppressed[key] = time.time() + 5.0
+            return o, Decision(status=kind, observation=o, votes=1, message=value)
+        return None
+
     def process_codes(self, bgr: np.ndarray):
         """Codes only (fast, every frame). Returns (observations, decision)."""
         import cv2
@@ -93,15 +108,13 @@ class Scanner:
         obs: list[Observation] = []
         for hit in decode_codes(gray, self.parser, formats=self.formats):
             self.stats["codes"] += 1
-            loc = self.parser.parse_location(hit.text)
-            if loc:
-                o = Observation(source="LOCATION", number="", text=loc, in_list=True, boxes=[hit.quad])
-                key = "\x00location:" + loc
-                if self._is_suppressed(key):
-                    obs.append(o)
-                    continue
-                self._suppressed[key] = time.time() + 5.0
-                return obs + [o], Decision(status="location", observation=o, votes=1, message=loc)
+            special = self._special_code(hit)
+            if special is not None:                 # a location or operator badge code
+                o, dec = special
+                obs.append(o)
+                if dec is not None:
+                    return obs, dec
+                continue
             if not hit.number:
                 continue
             obs.append(Observation(source=hit.format, number=hit.number, text=hit.text,

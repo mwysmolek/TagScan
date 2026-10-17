@@ -15,7 +15,8 @@ comes out of GitHub Actions; unzip anywhere and run `tagscan.exe`.
 
 * **Releases** on this repository: `kayEi-TagScan-portable-<version>.zip`. Unzip, run
   `tagscan.exe`. Windows SmartScreen warns once about the unsigned build: *More info → Run anyway*.
-* Data lands in `Documents\TagScan` (`scans.sqlite`, `photos\`, `tagscan.log`, exports).
+* Data lands in `Documents\TagScan`: `scans.sqlite`, `photos\<location>\<yyyymmdd>_<number>.jpg`,
+  `training\` (crops and frames of every read), `tagscan.log`, exports.
 
 ## Use it
 
@@ -26,23 +27,29 @@ Everything works with a finger; a keyboard is never required.
    what your labels look like (brand words, keyword in front of the number, how many
    digits, which columns hold number, description and location). Without one a generic
    profile is used.
-2. **Location:** tap the location button and pick one: recent locations, every location
+2. **Operator:** tap the operator button and pick your name (profile `operators`), a recent
+   one, or type a staff number on the pad. Or scan your **badge code**: a QR code reading
+   `OP: Anna` sets it (blue flash). The card nags until someone is set; every scan records
+   who made it.
+3. **Location:** tap the location button and pick one: recent locations, every location
    named in the list (profile `list.location_column`), or a number pad for room numbers.
    Or skip the screen entirely and scan a **location code**: a QR code reading `LOC: Hall 3`
    switches the location (blue flash). Print one per room and stick it on the door.
-3. Hold the label inside the **aim box** on the picture. Codes resolve instantly, anywhere
+4. Hold the label inside the **aim box** on the picture. Codes resolve instantly, anywhere
    in the picture. Printed labels are read from the box the moment its content holds still:
    the number must be read twice and be in the list to auto-confirm. Tap the picture to move
    the box there; **Read whole picture** (or Space) reads outside the box.
-4. Green card: **Found**, counts down, tap **Undo** if wrong. Orange card: **Check**, tap a
+5. Green card: **Found**, counts down, tap **Undo** if wrong. Orange card: **Check**, tap a
    suggestion, **OK**, or type the number on the pad. Items already scanned also stop for a
    check. The pad under the card adds a number by hand at any time.
-5. If three reads of a steady box come up empty, or you tap **Undo**, the card shows the box
+6. If three reads of a steady box come up empty, or you tap **Undo**, the card shows the box
    content with the pad: tap a suggestion or type the number. **Back** if there is nothing
    there.
-6. Recent scans sit at the bottom: tap one to delete it or change its location.
-7. **Export Excel**: sheets *Scans*, *List status* (found / missing per list item) and
-   *Not in list*.
+7. Recent scans sit at the bottom: tap one to delete it or change its location.
+8. **Export Excel**: sheets *Scans*, *List status* (found / missing per list item) and
+   *Not in list*, each with location and operator; the file is named after device and
+   operator. Photos sit in `photos\<location>\<yyyymmdd>_<number>.jpg`, so the archive can
+   be browsed by room without the spreadsheet.
 
 **Photos …** replays a folder of photos through the same pipeline, for testing without a camera.
 **Zoom** (the − / + buttons or a pinch on the picture) shrinks the aim box: that is how to
@@ -99,9 +106,10 @@ Build the portable app (on Windows): `pip install -r packaging/requirements-buil
   when the profile's keyword or brand was seen next to it, it is in the list, and two
   consecutive reads agree. The item just confirmed is ignored for a few seconds so it does
   not re-trigger while still in view.
-* Location codes: a code whose text matches `location_code_regex` (`LOC:`, `ORT:`, `RAUM:`,
-  `STANDORT:`, `ROOM:`, `LOCATION:` followed by the name) sets the location instead of
-  being treated as an item.
+* Location and badge codes: a code whose text matches `location_code_regex` (`LOC:`, `ORT:`,
+  `RAUM:`, `STANDORT:`, `ROOM:`, `LOCATION:` followed by the name) sets the location, one
+  matching `operator_code_regex` (`OP:`, `OPERATOR:`, `USER:`, `PERSON:`, `MITARBEITER:`,
+  `NAME:`) sets the operator, instead of being treated as an item.
 * Storage: SQLite + JPEG photos per device; merge several exports in Excel afterwards.
 
 License: MIT.

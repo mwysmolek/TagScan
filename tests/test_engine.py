@@ -165,3 +165,75 @@ def test_store_reads(tmp_path):
     row = st.db.execute("SELECT photo, scan_id FROM reads WHERE id=2").fetchone()
     assert row[0] == f"photos/{scan.photo}" and row[1] == scan.id       # no second copy of the frame
     assert st.read_counts() == {"typed": 1, "accepted": 1}
+
+
+def test_operator_code_and_badge_in_pipeline():
+    import cv2
+    import numpy as np
+    import zxingcpp
+    from tagscan.engine import Scanner
+    from tagscan.catalog import Item
+    p = TextParser(Profile())
+    assert p.parse_operator("OP: Anna Example") == "Anna Example"
+    assert p.parse_operator("Mitarbeiter=4711") == "4711"
+    assert p.parse_operator("LOC: Hall 3") == "" and p.parse_location("OP: Anna") == ""
+
+    def qr(text):
+        img = np.array(zxingcpp.write_barcode_to_image(zxingcpp.create_barcode(text, zxingcpp.BarcodeFormat.QRCode), scale=8))
+        return cv2.cvtColor(cv2.copyMakeBorder(img, 40, 40, 40, 40, cv2.BORDER_CONSTANT, value=255), cv2.COLOR_GRAY2BGR)
+
+    sc = Scanner(Profile(), Catalog(items={"4711": Item("4711", "4711", "x")}))
+    obs, dec = sc.process_codes(qr("OP: Anna"))
+    assert dec.status == "operator" and dec.observation.text == "Anna" and obs[0].source == "OPERATOR"
+    obs, dec = sc.process_codes(qr("OP: Anna"))               # quiet while suppressed
+    assert dec.status == "none" and obs[0].source == "OPERATOR"
+    obs, dec = sc.process_codes(qr("4711"))                   # an item still resolves normally
+    assert dec.status == "accept"
+
+
+def test_store_photo_layout_operator_and_migration(tmp_path):
+    import sqlite3
+    import numpy as np
+    from openpyxl import load_workbook
+    from tagscan.catalog import Item
+    from tagscan.store import Store, safe_name
+    assert safe_name('Hall 2 / Bay "A": x?') == "Hall 2 _ Bay _A__ x"
+    assert safe_name("   ") == "unknown" and safe_name("Büro 204") == "Büro 204" and safe_name("..") == "unknown"
+
+    # a database written by 0.2 (no operator columns) is migrated on open
+    (tmp_path / "old").mkdir()
+    db = sqlite3.connect(tmp_path / "old" / "scans.sqlite")
+    db.execute("CREATE TABLE scans(id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, number TEXT, description TEXT,"
+               " location TEXT, source TEXT, in_list INTEGER, photo TEXT, device TEXT, note TEXT DEFAULT '')")
+    db.execute("INSERT INTO scans(ts,number,description,location,source,in_list,photo,device,note) "
+               "VALUES('2026-10-16 10:00:00','1001','Cart','Hall 2','QR',1,'1001_20261016_100000.jpg','dev','')")
+    db.commit()
+    db.close()
+    st = Store(tmp_path / "old")
+    assert st.recent(1)[0].operator == "" and st.count() == 1
+
+    st = Store(tmp_path / "new")
+    frame = np.full((60, 80, 3), 90, np.uint8)
+    a = st.add("1001", "Cart", "Hall 2", "QR", True, image=frame, operator="Anna")
+    b = st.add("1001", "Cart", "Hall 2", "OCR", True, image=frame, operator="Anna")
+    c = st.add("28.019", "x", "", "MANUAL", False, image=frame)
+    import datetime as dt
+    day = dt.datetime.now().strftime("%Y%m%d")
+    assert a.photo == f"Hall 2/{day}_1001.jpg" and b.photo == f"Hall 2/{day}_1001_2.jpg"
+    assert c.photo == f"no-location/{day}_28.019.jpg"
+    for s in (a, b, c):
+        assert (tmp_path / "new" / "photos" / s.photo).exists()
+    assert st.recent(3)[0].operator == "" and st.recent(3)[2].operator == "Anna"
+    st.delete(b.id)
+    assert not (tmp_path / "new" / "photos" / b.photo).exists() and st.count() == 2
+    st.add_read("accepted", final_number="1001", source="QR", photo=a.photo, scan_id=a.id, operator="Anna")
+    assert st.db.execute("SELECT operator FROM reads").fetchone()[0] == "Anna"
+
+    out = st.export_xlsx(tmp_path / "out.xlsx", Catalog(items={"1001": Item("1001", "1001", "Cart")}))
+    wb = load_workbook(out)
+    rows = list(wb["Scans"].iter_rows(values_only=True))
+    assert rows[0][:4] == ("Number", "Description", "Location", "Operator") and rows[1][3] == "Anna"
+    status = list(wb["List status"].iter_rows(values_only=True))
+    assert status[0][4] == "Operator" and status[1][2] == "found" and status[1][4] == "Anna"
+    assert list(wb["Not in list"].iter_rows(values_only=True))[1][3] in ("", None)   # empty cell reads back as None
+    assert "_Anna_" in st.default_export_name("Anna") and "__" not in st.default_export_name("")

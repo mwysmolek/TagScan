@@ -89,13 +89,24 @@ def test_box_flow_accept_unreadable_undo(app, tmp_path):
     assert _pump(lambda: "ready" in win.engine_lbl.text() or "unavailable" in win.engine_lbl.text(), 60)
     assert "ready" in win.engine_lbl.text(), win.engine_lbl.text()
 
+    # 0. nobody set yet: the card says so; a badge code anywhere in the picture sets the operator
+    assert "operator" in win.card.head.text().lower() and win.operator_text == ""
+    badge = _qr_frame("OP: Anna", _textless_frame(seed=9))
+    assert _pump(lambda: win.operator_text == "Anna", 20, step=lambda: win._on_frame(badge)), win.op_btn.text()
+    assert win.op_btn.text() == "Operator: Anna" and "operator" not in win.card.head.text().lower()
+    win.set_location("Hall 2")
+
     # 1. a label held steady in the box is read from the crop and auto-accepted
     frame = _label_frame("123456")
     assert _pump(lambda: win.store.count() >= 1, 40, step=lambda: win._on_frame(frame)), win.card.head.text()
     scan = win.store.recent(1)[0]
     assert scan.number == "123456" and scan.source == "OCR" and scan.in_list
-    row = win.store.db.execute("SELECT outcome, ocr_number, crop, roi, photo FROM reads ORDER BY id DESC LIMIT 1").fetchone()
-    assert row[0] == "accepted" and row[1] == "123456" and row[2] and '"w"' in row[3] and row[4].startswith("photos/")
+    assert scan.operator == "Anna" and scan.location == "Hall 2"
+    assert scan.photo.startswith("Hall 2/") and scan.photo.endswith("_123456.jpg")
+    assert (tmp_path / "data" / "photos" / scan.photo).exists()
+    row = win.store.db.execute("SELECT outcome, ocr_number, crop, roi, photo, operator FROM reads ORDER BY id DESC LIMIT 1").fetchone()
+    assert row[0] == "accepted" and row[1] == "123456" and row[2] and '"w"' in row[3] and row[4] == f"photos/{scan.photo}"
+    assert row[5] == "Anna"
     assert (tmp_path / "data" / "training" / "crops" / row[2]).exists()
     assert win._need_change                                    # the same picture is not read again
 

@@ -240,6 +240,7 @@ class ResultCard(QFrame):
         self.setObjectName("card")
         self.setMinimumWidth(340)
         self.state = "idle"
+        self.idle_message = "Point the camera at a label"      # the window may replace it (e.g. "set the operator")
         self.pending: dict | None = None
         self._seconds = 3.0
         self._remaining = 0.0
@@ -327,12 +328,12 @@ class ResultCard(QFrame):
         self.set_idle()
 
     # ------------------------------------------------------------------ states
-    def set_idle(self, msg: str = "Point the camera at a label"):
+    def set_idle(self, msg: str | None = None):
         self.state = "idle"
         self.pending = None
         self._timer.stop()
         self.state_changed.emit("idle")
-        self.head.setText(msg)
+        self.head.setText(self.idle_message if msg is None else msg)
         self.number.setText("")
         self.desc.setText("")
         self.meta.setText("")
@@ -513,13 +514,19 @@ class ResultCard(QFrame):
             super().keyPressEvent(ev)
 
 
-class LocationPicker(QDialog):
-    """Pick the scanning location with a finger: recent and list locations as big buttons, a
-    number pad for room numbers, and a text field for the rare case a keyboard is at hand."""
+class TextPicker(QDialog):
+    """Pick a short text (the location, the operator) with a finger: choices and recent values
+    as big buttons, a number pad for room or staff numbers, and a text field for the rare
+    case a keyboard is at hand."""
 
-    def __init__(self, parent=None, current: str = "", choices=(), recent=()):
+    def __init__(self, parent=None, current: str = "", choices=(), recent=(), title: str = "Location",
+                 tap_hint: str = "Tap a location", placeholder: str = "room / hall",
+                 code_hint: str = "Or scan a location code: a QR code reading  LOC: <name>  switches the "
+                                  "location without touching the screen.",
+                 empty_hint: str = "No locations yet. Type one on the right, or give the list a\n"
+                                   "location column (profile: list.location_column) to see them here."):
         super().__init__(parent)
-        self.setWindowTitle("Location")
+        self.setWindowTitle(title)
         self.setModal(True)
         self.resize(940, 640)
         root = QHBoxLayout(self)
@@ -527,9 +534,9 @@ class LocationPicker(QDialog):
 
         # left: the choices
         left = QVBoxLayout()
-        title = QLabel("Tap a location")
-        title.setStyleSheet("font-size:15px;color:#555;")
-        left.addWidget(title)
+        title_lbl = QLabel(tap_hint)
+        title_lbl.setStyleSheet("font-size:15px;color:#555;")
+        left.addWidget(title_lbl)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -558,8 +565,7 @@ class LocationPicker(QDialog):
         scroll.setWidget(inner)
         left.addWidget(scroll, 1)
         if not seen:
-            empty = QLabel("No locations yet. Type one on the right, or give the list a\n"
-                           "location column (profile: list.location_column) to see them here.")
+            empty = QLabel(empty_hint)
             empty.setStyleSheet("color:#777;")
             left.addWidget(empty)
         root.addLayout(left, 3)
@@ -567,7 +573,7 @@ class LocationPicker(QDialog):
         # right: type it
         right = QVBoxLayout()
         self.edit = QLineEdit(current)
-        self.edit.setPlaceholderText("room / hall")
+        self.edit.setPlaceholderText(placeholder)
         self.edit.setMinimumHeight(56)
         self.edit.setStyleSheet("font-size:24px;")
         right.addWidget(self.edit)
@@ -575,8 +581,7 @@ class LocationPicker(QDialog):
         self.pad.attach(self.edit)
         self.pad.entered.connect(self.accept)
         right.addWidget(self.pad)
-        hint = QLabel("Or scan a location code: a QR code reading  LOC: <name>  switches the location "
-                      "without touching the screen.")
+        hint = QLabel(code_hint)
         hint.setWordWrap(True)
         hint.setStyleSheet("font-size:12px;color:#777;")
         right.addWidget(hint)
@@ -604,9 +609,25 @@ class LocationPicker(QDialog):
         return self.edit.text().strip()
 
     @classmethod
-    def pick(cls, parent, current: str, choices=(), recent=()) -> str | None:
-        dlg = cls(parent, current, choices, recent)
+    def pick(cls, parent, current: str, choices=(), recent=(), **kw) -> str | None:
+        dlg = cls(parent, current, choices, recent, **kw)
         return dlg.value() if dlg.exec() == QDialog.DialogCode.Accepted else None
+
+
+class LocationPicker(TextPicker):
+    """The location picker (TextPicker with its default texts)."""
+
+
+class OperatorPicker(TextPicker):
+    """Who is scanning: names from the profile, recent ones, or a staff number on the pad."""
+
+    def __init__(self, parent=None, current: str = "", choices=(), recent=()):
+        super().__init__(parent, current, choices, recent, title="Operator", tap_hint="Tap your name",
+                         placeholder="name or staff number",
+                         code_hint="Or scan your badge: a QR code reading  OP: <name>  sets the operator "
+                                   "without touching the screen.",
+                         empty_hint="No names yet. Type one on the right, or list them in the profile\n"
+                                    "(\"operators\": [...]) to see them here.")
 
 
 class HistoryStrip(QWidget):

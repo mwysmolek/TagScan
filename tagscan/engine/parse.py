@@ -27,6 +27,7 @@ class TextParser:
         self.lo, self.hi = lo, hi
         self.code_regex = re.compile(profile.code_number_regex, re.I | re.S) if profile.code_number_regex else None
         self.location_regex = re.compile(profile.location_code_regex, re.I | re.S) if profile.location_code_regex else None
+        self.operator_regex = re.compile(profile.operator_code_regex, re.I | re.S) if getattr(profile, "operator_code_regex", "") else None
 
     def numbers_in(self, s: str) -> list[str]:
         out = []
@@ -87,6 +88,13 @@ class TextParser:
         if not self.location_regex or not text or not text.strip():
             return ""
         m = self.location_regex.search(text.strip())
+        return m.group(1).strip() if m else ""
+
+    def parse_operator(self, text: str) -> str:
+        """The person named by a badge code such as ``OP: Anna``, else ""."""
+        if not self.operator_regex or not text or not text.strip():
+            return ""
+        m = self.operator_regex.search(text.strip())
         return m.group(1).strip() if m else ""
 
     def parse_code(self, text: str) -> str:
