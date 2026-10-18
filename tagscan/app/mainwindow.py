@@ -11,8 +11,8 @@ import cv2
 import numpy as np
 from PySide6.QtCore import Qt, QThread, Signal, QMutex, QWaitCondition, QSettings, QStandardPaths, QTimer
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPixmap
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
-                               QSizePolicy, QToolBar, QVBoxLayout, QWidget, QStatusBar)
+from PySide6.QtWidgets import (QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+                               QPushButton, QSizePolicy, QToolBar, QVBoxLayout, QWidget, QStatusBar)
 
 from .. import __version__
 from ..catalog import Catalog
@@ -305,6 +305,9 @@ class MainWindow(QMainWindow):
         self.export_btn = QPushButton("Export Excel")
         self.export_btn.clicked.connect(self.export)
         tb.addWidget(self.export_btn)
+        self.new_btn = QPushButton("New inventory …")
+        self.new_btn.clicked.connect(self.new_inventory)
+        tb.addWidget(self.new_btn)
 
         self.addToolBarBreak()
         tb2 = QToolBar("camera")
@@ -321,29 +324,19 @@ class MainWindow(QMainWindow):
         self.photos_btn.clicked.connect(self.choose_photos)
         tb2.addWidget(self.photos_btn)
         tb2.addSeparator()
-        tb2.addWidget(QLabel(" Zoom "))
-        self.zoom_out = QPushButton("−")
-        self.zoom_out.setFixedWidth(TOUCH + 8)
-        self.zoom_out.clicked.connect(lambda: self._zoom_step(-0.25))
-        tb2.addWidget(self.zoom_out)
-        self.zoom_lbl = QLabel("1×")
-        self.zoom_lbl.setStyleSheet("font-size:16px;min-width:44px;")
-        self.zoom_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        tb2.addWidget(self.zoom_lbl)
-        self.zoom_in = QPushButton("+")
-        self.zoom_in.setFixedWidth(TOUCH + 8)
-        self.zoom_in.clicked.connect(lambda: self._zoom_step(+0.25))
-        tb2.addWidget(self.zoom_in)
-        tb2.addSeparator()
         self.read_btn = QPushButton("Read whole picture")
         self.read_btn.setToolTip("OCR on the whole frame, for a label that does not fit the box")
         self.read_btn.clicked.connect(self._force_ocr)
         tb2.addWidget(self.read_btn)
 
+        # Landscape tablet held in both hands: the thumbs rest at the left and right edge, about
+        # mid-height. Everything a thumb must hit lives in two edge columns, vertically centred;
+        # the picture and the result panel sit in the middle; setup stays in the toolbars.
         central = QWidget()
         v = QVBoxLayout(central)
         v.setContentsMargins(6, 6, 6, 6)
         h = QHBoxLayout()
+        h.setSpacing(10)
         self.view = VideoView()
         self.view.tapped.connect(self._tapped)
         self.view.pinched.connect(lambda f: self._set_zoom(self._zoom * f))
@@ -357,13 +350,65 @@ class MainWindow(QMainWindow):
         self.card.state_changed.connect(self._card_state)
         if not logo.isNull():
             self.card.set_logo(logo)
-        h.addWidget(self.view, 3)
-        h.addWidget(self.card, 1)
-        v.addLayout(h, 1)
         self.history = HistoryStrip()
         self.history.delete_requested.connect(self._delete_scan)
         self.history.relocate_requested.connect(self._relocate_scan)
         self.history.undo_last_requested.connect(self._undo_last)
+
+        # left thumb column: zoom, SCAN / DISCARD, undo last scan
+        left = QWidget()
+        left.setFixedWidth(180)
+        lv = QVBoxLayout(left)
+        lv.setContentsMargins(0, 0, 0, 0)
+        lv.setSpacing(10)
+        self.zoom_in = QPushButton("Zoom  +")
+        self.zoom_out = QPushButton("Zoom  −")
+        self.zoom_lbl = QLabel("1×")
+        self.zoom_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.zoom_lbl.setStyleSheet("font-size:16px;color:#555;")
+        for b, d in ((self.zoom_in, +0.25), (self.zoom_out, -0.25)):
+            b.setMinimumHeight(56)
+            b.setStyleSheet("font-size:18px;")
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            b.clicked.connect(lambda _=False, d=d: self._zoom_step(d))
+        lv.addWidget(self.zoom_in)
+        lv.addWidget(self.zoom_lbl)
+        lv.addWidget(self.zoom_out)
+        lv.addStretch(1)
+        lv.addWidget(self.card.scan_btn_left)
+        lv.addWidget(self.card.discard_btn)
+        lv.addStretch(1)
+        self.history.undo_btn.setMinimumHeight(64)
+        lv.addWidget(self.history.undo_btn)
+
+        # centre: picture over the result panel
+        centre = QVBoxLayout()
+        centre.setSpacing(8)
+        centre.addWidget(self.view, 1)
+        centre.addWidget(self.card)
+
+        # right thumb column: SCAN / OK + Correct, the number pad
+        right = QWidget()
+        right.setFixedWidth(200)
+        rv = QVBoxLayout(right)
+        rv.setContentsMargins(0, 0, 0, 0)
+        rv.setSpacing(10)
+        rv.addStretch(1)
+        rv.addWidget(self.card.scan_btn)
+        rv.addWidget(self.card.ok_btn)
+        rv.addWidget(self.card.fix_btn)
+        manual = QHBoxLayout()
+        manual.setSpacing(6)
+        manual.addWidget(self.card.manual, 1)
+        manual.addWidget(self.card.manual_btn)
+        rv.addLayout(manual)
+        rv.addWidget(self.card.pad)
+        rv.addStretch(1)
+
+        h.addWidget(left)
+        h.addLayout(centre, 1)
+        h.addWidget(right)
+        v.addLayout(h, 1)
         v.addWidget(self.history)
         self.setCentralWidget(central)
 
@@ -948,6 +993,54 @@ class MainWindow(QMainWindow):
         if val is not None:
             self.store.update(sid, location=val)
             self._refresh_history()
+
+    def new_inventory(self):
+        """Archive scans, photos, training data and exports under archive/<date_time>/ and start
+        empty. List, operator and location stay."""
+        n = self.store.count()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("New inventory")
+        dlg.setModal(True)
+        dlg.resize(620, 360)
+        lay = QVBoxLayout(dlg)
+        lay.setSpacing(12)
+        msg = QLabel(f"Start a new inventory?\n\nThe current {n} scans, their photos, the training data and the "
+                     f"exports are moved to\n{self.data_dir / 'archive'}\nand the app starts empty. "
+                     f"List, operator and location are kept.")
+        msg.setWordWrap(True)
+        msg.setStyleSheet("font-size:15px;")
+        lay.addWidget(msg)
+        lay.addStretch(1)
+        choice = {"v": None}
+
+        def pick(v):
+            choice["v"] = v
+            dlg.accept()
+        for text, val, style in (("Export Excel first, then start new", "export", "font-size:18px;font-weight:600;background:#2ea043;color:white;border-radius:10px;"),
+                                 ("Start new without export", "new", "font-size:18px;font-weight:600;background:#f08c00;color:white;border-radius:10px;"),
+                                 ("Cancel", None, "font-size:18px;border-radius:10px;")):
+            b = QPushButton(text)
+            b.setMinimumHeight(64)
+            b.setStyleSheet(style)
+            b.clicked.connect(lambda _=False, v=val: pick(v) if v else dlg.reject())
+            lay.addWidget(b)
+        if dlg.exec() != QDialog.DialogCode.Accepted or choice["v"] is None:
+            return
+        if choice["v"] == "export":
+            try:
+                out = self.store.export_xlsx(self.data_dir / self.store.default_export_name(self.operator_text), self.catalog)
+                log.info("exported %s before the new inventory", out)
+            except Exception as ex:
+                log.exception("export before new inventory failed")
+                QMessageBox.warning(self, "Export", f"Export failed, nothing archived:\n{ex}")
+                return
+        self.card.set_idle()
+        self._ctx = {}
+        dest = self.store.archive()
+        self.worker.reset()
+        self._refresh_history()
+        self.statusBar().showMessage(f"new inventory started; the old one is in {dest}", 10000)
+        log.info("new inventory: previous data archived to %s", dest)
 
     def export(self):
         default = str(self.data_dir / self.store.default_export_name(self.operator_text))

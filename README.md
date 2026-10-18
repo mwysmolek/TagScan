@@ -20,7 +20,10 @@ comes out of GitHub Actions; unzip anywhere and run `tagscan.exe`.
 
 ## Use it
 
-Everything works with a finger; a keyboard is never required.
+Everything works with a finger; a keyboard is never required. The layout is made for a
+tablet held in landscape with both hands: SCAN, OK, Correct and DISCARD sit at the left and
+right edge at thumb height, the number pad under the right thumb, the picture and the result
+in the middle, and the once-a-day setup (list, operator, location, export) in the toolbar.
 
 1. **List …** choose the Excel/CSV with the known numbers (and the sheet). A
    `tagscan_profile.json` next to the list is picked up automatically and tells TagScan
@@ -52,6 +55,9 @@ Everything works with a finger; a keyboard is never required.
    *Not in list*, each with location and operator; the file is named after device and
    operator. Photos sit in `photos\<location>\<yyyymmdd>_<number>.jpg`, so the archive can
    be browsed by room without the spreadsheet.
+9. **New inventory …** moves the scans, photos, training data and exports of the finished
+   inventory to `archive\<date_time>\` (optionally exporting first) and starts empty; list,
+   operator and location are kept.
 
 **Photos …** replays a folder of photos through the same pipeline, for testing without a camera.
 **Zoom** (the − / + buttons or a pinch on the picture) shrinks the aim box: that is how to

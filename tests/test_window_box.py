@@ -226,4 +226,12 @@ def test_tap_to_scan_flow(app, tmp_path):
     win._undo_last()
     assert win.store.count() == 0 and not (tmp_path / "data" / "photos" / photo).exists()
     assert win.store.db.execute("SELECT outcome, final_number FROM reads ORDER BY id DESC LIMIT 1").fetchone() == ("deleted", "123456")
+
+    # 6. a new inventory archives everything and the window keeps working on the fresh store
+    reads_before = sum(win.store.read_counts().values())
+    assert reads_before > 0
+    dest = win.store.archive()
+    win._refresh_history()
+    assert win.store.count() == 0 and win.store.read_counts() == {} and (dest / "scans.sqlite").exists()
+    assert win.operator_text == "456cd" and "0 scans" in win.count_lbl.text()
     win.close()

@@ -39,9 +39,10 @@ def test_card_pad_visibility_and_manual_entry(app):
     got = []
     card.confirmed.connect(lambda *a: got.append(a))
     card.lookup = lambda n: (n == "1001", "Cart" if n == "1001" else "", [])
-    assert card.state == "idle" and not card.pad.isHidden() and not card.scan_btn.isHidden()
+    assert card.state == "idle" and not card.pad.isHidden() and not card.scan_btn.isHidden() and not card.scan_btn_left.isHidden()
     card.set_accept("1001", "Cart", "QR", 60.0)
-    assert card.pad.isHidden() and not card.fix_btn.isHidden() and not card.discard_btn.isHidden() and card.scan_btn.isHidden()
+    assert card.pad.isHidden() and not card.fix_btn.isHidden() and not card.discard_btn.isHidden()
+    assert card.scan_btn.isHidden() and card.scan_btn_left.isHidden()
     card._undo()                                      # Correct
     assert card.state == "idle" and not card.pad.isHidden()
     discarded = []
@@ -160,3 +161,41 @@ def test_light_theme(app):
     pal = app.palette()
     assert pal.color(QPalette.ColorRole.Text).lightness() < 80 and pal.color(QPalette.ColorRole.Base).lightness() > 240
     assert pal.color(QPalette.ColorRole.ButtonText).lightness() < 80 and pal.color(QPalette.ColorRole.Window).lightness() > 230
+
+
+def test_window_layout_puts_controls_at_the_edges(app, tmp_path):
+    """The thumb columns hold the decision controls; the centre panel holds the information."""
+    from PySide6.QtCore import QSettings
+    from tagscan.app.mainwindow import MainWindow
+    from tagscan.profile import Profile
+    from tagscan.catalog import Catalog
+    win = MainWindow(profile=Profile(), catalog=Catalog(), data_dir=str(tmp_path / "data"),
+                     settings=QSettings(str(tmp_path / "s.ini"), QSettings.Format.IniFormat))
+    win.resize(1280, 800)
+    win.show()
+    from PySide6.QtCore import QCoreApplication
+    QCoreApplication.processEvents()
+    c = win.card
+    centre_x = win.width() / 2
+
+    def x(b):
+        return b.mapTo(win, b.rect().center()).x()
+
+    def y(b):
+        return b.mapTo(win, b.rect().center()).y()
+    # idle: SCAN at both edges, pad on the right, zoom and undo on the left
+    for b in (c.scan_btn_left, win.history.undo_btn, win.zoom_in):
+        assert x(b) < centre_x * 0.4, b.text()
+    for b in (c.scan_btn, c.pad):
+        assert x(b) > centre_x * 1.6
+    assert abs(y(c.scan_btn_left) - win.height() / 2) < win.height() * 0.3
+    assert abs(y(c.scan_btn) - win.height() / 2) < win.height() * 0.3
+    # a card: DISCARD left, OK and Correct right, all at thumb height
+    c.set_accept("1001", "Cart", "QR", 60.0)
+    QCoreApplication.processEvents()
+    assert x(c.discard_btn) < centre_x * 0.4 and x(c.ok_btn) > centre_x * 1.6 and x(c.fix_btn) > centre_x * 1.6
+    assert abs(y(c.discard_btn) - win.height() / 2) < win.height() * 0.3 and abs(y(c.ok_btn) - win.height() / 2) < win.height() * 0.3
+    # the result panel is below the picture, in the middle
+    assert y(c) > y(win.view) and abs(x(c) - centre_x) < centre_x * 0.3
+    assert c.scan_btn.minimumHeight() >= 100 and c.discard_btn.minimumHeight() >= 100 and c.ok_btn.minimumHeight() >= 100
+    win.close()
