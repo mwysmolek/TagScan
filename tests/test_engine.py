@@ -237,3 +237,22 @@ def test_store_photo_layout_operator_and_migration(tmp_path):
     assert status[0][4] == "Operator" and status[1][2] == "found" and status[1][4] == "Anna"
     assert list(wb["Not in list"].iter_rows(values_only=True))[1][3] in ("", None)   # empty cell reads back as None
     assert "_Anna_" in st.default_export_name("Anna") and "__" not in st.default_export_name("")
+
+
+def test_store_archive_starts_fresh(tmp_path):
+    import numpy as np
+    from tagscan.store import Store
+    st = Store(tmp_path)
+    frame = np.full((40, 60, 3), 90, np.uint8)
+    a = st.add("1001", "Cart", "Hall 2", "QR", True, image=frame, operator="456cd")
+    st.add_read("accepted", final_number="1001", source="QR", photo=a.photo, scan_id=a.id, crop=frame)
+    st.export_xlsx(tmp_path / "TagScan_dev_x.xlsx")
+    assert st.count() == 1 and (tmp_path / "photos" / a.photo).exists()
+    dest = st.archive()
+    assert dest.parent == tmp_path / "archive"
+    assert st.count() == 0 and st.read_counts() == {} and not (tmp_path / "photos" / a.photo).exists()
+    assert (dest / "photos" / a.photo).exists() and (dest / "scans.sqlite").exists()
+    assert list((dest / "training" / "crops").iterdir()) and (dest / "TagScan_dev_x.xlsx").exists()
+    assert not list(tmp_path.glob("*.xlsx"))
+    b = st.add("1002", "Mouse", "Hall 2", "QR", True, image=frame)          # the fresh store works
+    assert st.count() == 1 and (tmp_path / "photos" / b.photo).exists()

@@ -248,34 +248,46 @@ class NumberPad(QWidget):
             self.target.insert(k)
 
 
+THUMB = 120     # height of a button meant for a thumb at the edge of the tablet
+
+
 class ResultCard(QFrame):
-    """Idle -> (seen) -> accept with countdown | review with buttons -> idle.
-    The number pad under the card types a number without a keyboard."""
+    """The result panel (centre, under the picture) and the owner of every decision control.
+    The window places the controls into the thumb columns at the left and right edge of the
+    screen; this class only decides which of them show in which state:
+
+    idle   -> SCAN (both edges), number pad
+    accept -> OK + Correct (right), DISCARD (left), countdown
+    review -> OK (right), DISCARD (left), suggestions, number pad
+    input  -> DISCARD (left), number pad with focus ("type it")
+    """
     confirmed = Signal(str, str, bool, str, str, str)   # number, source, in_list, description, note, outcome
     discarded = Signal(str)                        # number (Discard on a green or orange card)
     undone = Signal(str)                           # number (Correct on a green card: wrong read, type it)
     backed = Signal(str)                           # Discard on the "type it" screen (prior number)
-    scan_requested = Signal()                      # the big SCAN button
+    scan_requested = Signal()                      # a SCAN button
     state_changed = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setObjectName("card")
-        self.setMinimumWidth(340)
+        self.setMinimumHeight(170)
         self.state = "idle"
         self.idle_message = "Point the camera at a label"      # the window may replace it (e.g. "set the operator")
-        self.scan_enabled = True                               # the SCAN button (tap-to-scan mode)
+        self.scan_enabled = True                               # SCAN buttons (tap-to-scan mode)
         self.pending: dict | None = None
         self._seconds = 3.0
         self._remaining = 0.0
         self._timer = QTimer(self)
         self._timer.setInterval(50)
         self._timer.timeout.connect(self._tick)
+        self._logo: QPixmap | None = None
 
+        # ---- the panel
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(14, 14, 14, 14)
-        lay.setSpacing(8)
+        lay.setContentsMargins(14, 10, 14, 10)
+        lay.setSpacing(6)
         self.head = QLabel("Point the camera at a label")
         self.head.setWordWrap(True)
         self.head.setStyleSheet("font-size:15px;color:#555;")
@@ -288,42 +300,41 @@ class ResultCard(QFrame):
         self.meta = QLabel("")
         self.meta.setWordWrap(True)
         self.meta.setStyleSheet("font-size:12px;color:#777;")
-        self.scan_btn = QPushButton("SCAN")
-        self.scan_btn.setMinimumHeight(72)
-        self.scan_btn.setStyleSheet("font-size:26px;font-weight:700;background:#2ea043;color:white;border-radius:10px;letter-spacing:2px;")
-        self.scan_btn.setToolTip("Read the box now (or tap the picture, or press Space)")
-        self._logo: QPixmap | None = None
+        self.pic = QLabel()                      # the box content, so the operator can read it; the logo when idle
+        self.pic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.pic.setFixedWidth(300)
+        self.pic.hide()
         self.bar = QProgressBar()
         self.bar.setRange(0, 1000)
         self.bar.setTextVisible(False)
         self.bar.setFixedHeight(10)
         self.bar.hide()
-        self.pic = QLabel()                      # the box content, so the operator can read it
-        self.pic.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.pic.setStyleSheet("background:#222;border-radius:6px;")
-        self.pic.setMinimumHeight(120)
-        self.pic.hide()
-
         self.alts = QWidget()
-        self.alts_lay = QGridLayout(self.alts)
+        self.alts_lay = QHBoxLayout(self.alts)
         self.alts_lay.setContentsMargins(0, 0, 0, 0)
-        self.alts_lay.setSpacing(6)
+        self.alts_lay.setSpacing(8)
+        text = QVBoxLayout()
+        text.setSpacing(2)
+        text.addWidget(self.head)
+        text.addWidget(self.number)
+        text.addWidget(self.desc)
+        text.addWidget(self.meta)
+        text.addStretch(1)
+        row = QHBoxLayout()
+        row.addLayout(text, 1)
+        row.addWidget(self.pic)
+        lay.addLayout(row, 1)
+        lay.addWidget(self.bar)
+        lay.addWidget(self.alts)
 
-        btns = QHBoxLayout()
-        self.ok_btn = QPushButton("OK  ✓")
-        self.ok_btn.setMinimumHeight(60)
-        self.ok_btn.setStyleSheet(BTN_OK)
-        self.fix_btn = QPushButton("Correct")              # green card: the read is wrong, type the right one
-        self.fix_btn.setMinimumHeight(60)
-        self.fix_btn.setStyleSheet("font-size:18px;font-weight:600;background:#f08c00;color:white;border-radius:8px;")
-        self.discard_btn = QPushButton("Discard  ✗")       # every card: drop what was captured
-        self.discard_btn.setMinimumHeight(60)
-        self.discard_btn.setStyleSheet(BTN_DISCARD)
-        btns.addWidget(self.ok_btn, 2)
-        btns.addWidget(self.fix_btn, 1)
-        btns.addWidget(self.discard_btn, 1)
-
-        manual = QHBoxLayout()
+        # ---- the controls (placed by the window into the thumb columns)
+        self.scan_btn = self._big("SCAN", "font-size:28px;font-weight:700;background:#2ea043;color:white;border-radius:14px;letter-spacing:2px;")
+        self.scan_btn_left = self._big("SCAN", "font-size:28px;font-weight:700;background:#2ea043;color:white;border-radius:14px;letter-spacing:2px;")
+        for b in (self.scan_btn, self.scan_btn_left):
+            b.setToolTip("Read the box now (or tap the picture, or press Space)")
+        self.ok_btn = self._big("OK  ✓", "font-size:26px;font-weight:700;background:#2ea043;color:white;border-radius:14px;")
+        self.fix_btn = self._big("Correct", "font-size:18px;font-weight:600;background:#f08c00;color:white;border-radius:12px;", height=64)
+        self.discard_btn = self._big("DISCARD  ✗", "font-size:22px;font-weight:700;background:#d1242f;color:white;border-radius:14px;")
         self.manual = QLineEdit()
         self.manual.setPlaceholderText("number …")
         self.manual.setMinimumHeight(TOUCH)
@@ -331,24 +342,9 @@ class ResultCard(QFrame):
         self.manual_btn = QPushButton("Add")
         self.manual_btn.setMinimumHeight(TOUCH)
         self.manual_btn.setStyleSheet(f"font-size:16px;color:{TEXT};")
-        manual.addWidget(self.manual, 1)
-        manual.addWidget(self.manual_btn)
-        self.pad = NumberPad(height=44)
+        self.pad = NumberPad(height=52)
         self.pad.attach(self.manual)
         self.pad.entered.connect(self._manual)
-
-        lay.addWidget(self.scan_btn)
-        lay.addWidget(self.head)
-        lay.addWidget(self.number)
-        lay.addWidget(self.desc)
-        lay.addWidget(self.meta)
-        lay.addWidget(self.bar)
-        lay.addWidget(self.pic)
-        lay.addWidget(self.alts)
-        lay.addStretch(1)
-        lay.addLayout(btns)
-        lay.addLayout(manual)
-        lay.addWidget(self.pad)
 
         self.ok_btn.clicked.connect(self._ok)
         self.discard_btn.clicked.connect(self._skip)
@@ -356,8 +352,28 @@ class ResultCard(QFrame):
         self.manual_btn.clicked.connect(self._manual)
         self.manual.returnPressed.connect(self._manual)
         self.scan_btn.clicked.connect(self.scan_requested.emit)
+        self.scan_btn_left.clicked.connect(self.scan_requested.emit)
         self.lookup = None          # callable number -> (in_list, description, nearest[list of Item])
         self.set_idle()
+
+    @staticmethod
+    def _big(text: str, style: str, height: int = THUMB) -> QPushButton:
+        b = QPushButton(text)
+        b.setMinimumHeight(height)
+        b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        b.setStyleSheet(style)
+        return b
+
+    def _controls(self, scan: bool, ok: bool, fix: bool, discard: bool, pad: bool) -> None:
+        for b in (self.scan_btn, self.scan_btn_left):
+            b.setVisible(scan and self.scan_enabled)
+        self.ok_btn.setVisible(ok)
+        self.fix_btn.setVisible(fix)
+        self.discard_btn.setVisible(discard)
+        self.pad.setVisible(pad)
+        self.manual.setVisible(pad)
+        self.manual_btn.setVisible(pad)
 
     # ------------------------------------------------------------------ states
     def set_idle(self, msg: str | None = None):
@@ -371,11 +387,7 @@ class ResultCard(QFrame):
         self.meta.setText("")
         self.bar.hide()
         self._clear_alts()
-        self.ok_btn.hide()
-        self.discard_btn.hide()
-        self.fix_btn.hide()
-        self.scan_btn.setVisible(self.scan_enabled)
-        self.pad.show()
+        self._controls(scan=True, ok=False, fix=False, discard=False, pad=True)
         self._show_logo()
         self.setStyleSheet("QFrame#card{background:#fafafa;border:1px solid #ddd;border-radius:10px;}")
 
@@ -390,7 +402,7 @@ class ResultCard(QFrame):
             self.pic.clear()
             return
         self.pic.setStyleSheet("background:transparent;")
-        self.pic.setPixmap(self._logo.scaled(150, 150, Qt.AspectRatioMode.KeepAspectRatio,
+        self.pic.setPixmap(self._logo.scaled(120, 120, Qt.AspectRatioMode.KeepAspectRatio,
                                              Qt.TransformationMode.SmoothTransformation))
         self.pic.show()
 
@@ -412,15 +424,11 @@ class ResultCard(QFrame):
         self.meta.setText(note)
         self._clear_alts()
         self.pic.hide()
-        self.scan_btn.hide()
         self.bar.show()
         self._seconds = max(0.05, seconds)
         self._remaining = self._seconds
         self.bar.setValue(1000)
-        self.ok_btn.show()
-        self.fix_btn.show()
-        self.discard_btn.show()
-        self.pad.hide()
+        self._controls(scan=False, ok=True, fix=True, discard=True, pad=False)
         self.setStyleSheet("QFrame#card{background:#e9f7ec;border:2px solid #2ea043;border-radius:10px;}")
         self._timer.start()
 
@@ -432,21 +440,17 @@ class ResultCard(QFrame):
         self.number.setText(number or "?")
         self.number.setStyleSheet("font-size:44px;font-weight:700;color:#b35c00;")
         self.desc.setText(description if in_list else "not in the list")
-        self.meta.setText("tap a suggestion, OK to keep as read, or type the number")
+        self.meta.setText("tap a suggestion, OK to keep as read, type the number, or discard")
         self.bar.hide()
         self._timer.stop()
-        self.scan_btn.hide()
         self._show_pic(image)
         self._set_alts(nearest)
-        self.ok_btn.show()
-        self.fix_btn.hide()
-        self.discard_btn.show()
-        self.pad.show()
+        self._controls(scan=False, ok=True, fix=False, discard=True, pad=True)
         self.setStyleSheet("QFrame#card{background:#fff4e5;border:2px solid #f08c00;border-radius:10px;}")
 
     def set_input(self, image, prior: str = "", reason: str = "unreadable", nearest=()):
-        """The "type it" screen: OCR gave up on a steady box, or the operator undid a read.
-        Shows the box content, suggestions, and the pad; Back returns to idle."""
+        """The "type it" screen: the scan gave nothing, or the operator wants to correct a read.
+        Shows the box content and suggestions; the pad has focus; DISCARD leaves."""
         self.state = "input"
         self.state_changed.emit("input")
         self.pending = dict(number=prior, description="", source="MANUAL", in_list=False, note=reason)
@@ -457,16 +461,12 @@ class ResultCard(QFrame):
         self.number.setText(prior or "")
         self.number.setStyleSheet("font-size:44px;font-weight:700;color:#999;")
         self.desc.setText("")
-        self.meta.setText("tap a suggestion or type the number on the pad; Back if there is nothing to add")
+        self.meta.setText("tap a suggestion or type the number on the pad; DISCARD if there is nothing to add")
         self.bar.hide()
         self._timer.stop()
-        self.scan_btn.hide()
         self._show_pic(image)
         self._set_alts(nearest)
-        self.ok_btn.hide()
-        self.fix_btn.hide()
-        self.discard_btn.show()
-        self.pad.show()
+        self._controls(scan=False, ok=False, fix=False, discard=True, pad=True)
         self.manual.setFocus()
         self.setStyleSheet("QFrame#card{background:#eef3fb;border:2px solid #3c8ce6;border-radius:10px;}")
 
@@ -476,20 +476,20 @@ class ResultCard(QFrame):
             self.pic.clear()
             return
         self.pic.setStyleSheet("background:#222;border-radius:6px;")
-        w = max(200, self.width() - 40)
-        pm = QPixmap.fromImage(image).scaled(w, 220, Qt.AspectRatioMode.KeepAspectRatio,
+        pm = QPixmap.fromImage(image).scaled(300, 150, Qt.AspectRatioMode.KeepAspectRatio,
                                              Qt.TransformationMode.SmoothTransformation)
         self.pic.setPixmap(pm)
         self.pic.show()
 
     def _set_alts(self, nearest) -> None:
         self._clear_alts()
-        for i, it in enumerate(list(nearest)[:4]):
-            b = QPushButton(f"{it.number}\n{it.description[:34]}")
-            b.setMinimumHeight(56)
-            b.setStyleSheet(f"text-align:left;font-size:13px;border-radius:6px;color:{TEXT};background:#ffffff;border:1px solid #c5c9d0;")
+        for it in list(nearest)[:4]:
+            b = QPushButton(f"{it.number}\n{it.description[:30]}")
+            b.setMinimumHeight(60)
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            b.setStyleSheet(f"text-align:left;font-size:13px;border-radius:8px;color:{TEXT};background:#ffffff;border:1px solid #c5c9d0;padding:0 8px;")
             b.clicked.connect(lambda _=False, it=it: self._choose(it))
-            self.alts_lay.addWidget(b, i // 2, i % 2)
+            self.alts_lay.addWidget(b)
 
     # ------------------------------------------------------------------ actions
     def _tick(self):

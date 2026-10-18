@@ -124,6 +124,22 @@ class Store:
         self.db.commit()
         return cur.lastrowid
 
+    def archive(self) -> Path:
+        """Start a new inventory: move the database, photos, training data and exports into
+        archive/<date_time>/ and reopen empty. Settings, list and log stay."""
+        import shutil
+        self.db.close()
+        dest = self.folder / "archive" / dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        dest.mkdir(parents=True, exist_ok=True)
+        for name in ("scans.sqlite", "photos", "training"):
+            src = self.folder / name
+            if src.exists():
+                shutil.move(str(src), str(dest / name))
+        for f in self.folder.glob("*.xlsx"):
+            shutil.move(str(f), str(dest / f.name))
+        self.__init__(self.folder)
+        return dest
+
     def read_counts(self) -> dict[str, int]:
         return {k: n for k, n in self.db.execute("SELECT outcome, COUNT(*) FROM reads GROUP BY outcome")}
 
