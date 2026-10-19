@@ -256,3 +256,11 @@ def test_store_archive_starts_fresh(tmp_path):
     assert not list(tmp_path.glob("*.xlsx"))
     b = st.add("1002", "Mouse", "Hall 2", "QR", True, image=frame)          # the fresh store works
     assert st.count() == 1 and (tmp_path / "photos" / b.photo).exists()
+
+
+def test_describe_guess_from_label_text():
+    p = TextParser(Profile())
+    assert p.describe("ACME\nASSET NO.\n123456\nRolling cart 3 drawers", "123456") == "Rolling cart 3 drawers"
+    assert p.describe("ACME\nASSET NO.\n123456", "123456") == ""
+    assert p.describe("", "1") == "" and p.describe("12.03.2024\n123456\nMonitor 27", "123456") == "Monitor 27"
+    assert len(p.describe("x" * 200, "")) == 60

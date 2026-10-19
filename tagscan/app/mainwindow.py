@@ -23,7 +23,8 @@ from .aim import Box, Stability, box_rect, crop_box
 from .assets import asset_path
 from .camera import CameraSource, FolderSource, bgr_to_qimage
 from .sysinfo import rss_mb
-from .widgets import GREEN, ORANGE, BLUE, HistoryStrip, LocationPicker, OperatorPicker, ResultCard, VideoView, TOUCH
+from .widgets import (GREEN, ORANGE, BLUE, DescriptionPicker, HistoryStrip, LocationPicker, OperatorPicker,
+                      ResultCard, VideoView, TOUCH)
 
 log = logging.getLogger("tagscan")
 
@@ -906,11 +907,30 @@ class MainWindow(QMainWindow):
             log.exception("training record failed")
 
     # ------------------------------------------------------------------ decisions
+    def _recent_descriptions(self) -> list[str]:
+        v = self.settings.value("recent_descriptions", [])
+        if isinstance(v, str):
+            v = [v] if v else []
+        return [str(x) for x in (v or []) if str(x).strip()]
+
+    def _ask_description(self, number: str, guess: str) -> str:
+        """A number that is not in the list is a new item: ask what it is (Skip allowed)."""
+        text = DescriptionPicker.ask(self, number, guess, self._recent_descriptions())
+        if text:
+            recent = [text] + [r for r in self._recent_descriptions() if r != text]
+            self.settings.setValue("recent_descriptions", recent[:8])
+        return text
+
     def _confirmed(self, number, source, in_list, description, note, outcome="confirmed"):
         ctx = self._ctx or {}
         frame = ctx.get("frame")
         if frame is None:
             frame = self._last_frame
+        if not in_list and not description:
+            sc = self.worker.scanner
+            guess = sc.parser.describe(ctx.get("ocr_text", ""), number) if sc else ""
+            description = self._ask_description(number, guess)
+            note = (note + "; " if note else "") + "new item"
         scan = self.store.add(number, description, self.location_text, source, in_list, image=frame, note=note,
                               operator=self.operator_text)
         log.info("scan %s %s %s in_list=%s outcome=%s by %r at %r", scan.id, number, source, in_list, outcome,

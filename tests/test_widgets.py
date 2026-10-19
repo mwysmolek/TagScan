@@ -199,3 +199,14 @@ def test_window_layout_puts_controls_at_the_edges(app, tmp_path):
     assert y(c) > y(win.view) and abs(x(c) - centre_x) < centre_x * 0.3
     assert c.scan_btn.minimumHeight() >= 100 and c.discard_btn.minimumHeight() >= 100 and c.ok_btn.minimumHeight() >= 100
     win.close()
+
+
+def test_description_picker(app):
+    from tagscan.app.widgets import DescriptionPicker
+    dlg = DescriptionPicker(None, "999999", guess="Rolling cart", recent=["Monitor"])
+    assert dlg.edit.text() == "Rolling cart" and "999999" in dlg.windowTitle() + dlg.findChildren(type(dlg.hint))[0].text() + "999999"
+    QTimer.singleShot(0, dlg.accept)
+    assert dlg.exec() == dlg.DialogCode.Accepted and dlg.value() == "Rolling cart"
+    dlg = DescriptionPicker(None, "999999")
+    QTimer.singleShot(0, dlg.reject)                      # Skip
+    assert dlg.exec() != dlg.DialogCode.Accepted and DescriptionPicker.ask.__name__ == "ask"

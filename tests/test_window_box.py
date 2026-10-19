@@ -220,6 +220,18 @@ def test_tap_to_scan_flow(app, tmp_path):
     QCoreApplication.processEvents()
     assert win.store.db.execute("SELECT outcome FROM reads ORDER BY id DESC LIMIT 1").fetchone()[0] == "discarded"
 
+    # 4b. a number that is not in the list asks for a description and is stored with it
+    asked = []
+    win._ask_description = lambda number, guess: (asked.append((number, guess)), "new rolling cart")[1]
+    for k in "999999":
+        win.card.pad._press(k)
+    win.card.pad._press("✓")
+    QCoreApplication.processEvents()
+    s = win.store.recent(1)[0]
+    assert asked == [("999999", "")] and s.number == "999999" and not s.in_list
+    assert s.description == "new rolling cart" and "new item" in s.note and s.operator == "456cd"
+    win.store.delete(s.id)
+
     # 5. Undo last scan removes the stored scan and its photo
     photo = win.store.recent(1)[0].photo
     assert (tmp_path / "data" / "photos" / photo).exists()

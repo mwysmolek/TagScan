@@ -46,7 +46,10 @@ in the middle, and the once-a-day setup (list, operator, location, export) in th
    box there and scans. **Read whole picture** reads outside the box.
 5. Green card: **Found**, counts down. **OK** keeps it, **Correct** opens the pad with the
    read shown, **Discard** drops it. Orange card: **Check**, tap a suggestion, **OK**, type
-   the number on the pad, or **Discard**. Items already scanned also stop for a check.
+   the number on the pad, or **Discard**. Items already scanned also stop for a check. A
+   number that is not in the list is a new item: **OK** stores it with number, location,
+   operator and photo and asks what it is (prefilled from the label's text, Skip allowed);
+   it appears on the *Not in list* sheet of the export.
 6. If the scan comes up empty the card shows the box content with the pad: tap a suggestion
    or type the number, or **Discard** if there is nothing there. **Undo last scan** next to
    the recent strip removes a scan that slipped through.
