@@ -570,7 +570,7 @@ class TextPicker(QDialog):
                  placeholder: str = "room / hall",
                  code_hint: str = "Or scan a location code: a QR code reading  LOC: <name>  switches the "
                                   "location without touching the screen.",
-                 pattern: str = ""):
+                 pattern: str = "", cancel_text: str = "Cancel"):
         super().__init__(parent)
         import re
         self.setWindowTitle(title)
@@ -627,17 +627,18 @@ class TextPicker(QDialog):
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet("font-size:12px;color:#b35c00;")
         v.addWidget(self.hint)
-        hint = QLabel(code_hint)
-        hint.setWordWrap(True)
-        hint.setStyleSheet("font-size:12px;color:#777;")
-        v.addWidget(hint)
+        if code_hint:
+            hint = QLabel(code_hint)
+            hint.setWordWrap(True)
+            hint.setStyleSheet("font-size:12px;color:#777;")
+            v.addWidget(hint)
         v.addStretch(1)
         row = QHBoxLayout()
         self.ok = QPushButton("OK  ✓")
         self.ok.setMinimumHeight(60)
         self.ok.setStyleSheet(BTN_OK)
         self.ok.clicked.connect(self.accept)
-        cancel = QPushButton("Cancel")
+        cancel = QPushButton(cancel_text)
         cancel.setMinimumHeight(60)
         cancel.setStyleSheet(BTN_PLAIN)
         cancel.clicked.connect(self.reject)
@@ -679,6 +680,21 @@ class TextPicker(QDialog):
 
 class LocationPicker(TextPicker):
     """The location picker (TextPicker with its default texts)."""
+
+
+class DescriptionPicker(TextPicker):
+    """An item that is not in the list: what is it? Prefilled with the label's text when OCR
+    saw a name, recent descriptions as one-tap buttons, Skip to store it without one."""
+
+    def __init__(self, parent=None, number: str = "", guess: str = "", recent=()):
+        super().__init__(parent, guess, (), recent, title="New item",
+                         prompt=f"{number} is not in the list.  What is it?  (optional)",
+                         placeholder="description, e.g. monitor, cart, laptop", code_hint="", cancel_text="Skip")
+
+    @classmethod
+    def ask(cls, parent, number: str, guess: str = "", recent=()) -> str:
+        dlg = cls(parent, number, guess, recent)
+        return dlg.value() if dlg.exec() == QDialog.DialogCode.Accepted else ""
 
 
 class OperatorPicker(TextPicker):

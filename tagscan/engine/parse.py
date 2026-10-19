@@ -90,6 +90,23 @@ class TextParser:
         m = self.location_regex.search(text.strip())
         return m.group(1).strip() if m else ""
 
+    def describe(self, text: str, number: str = "") -> str:
+        """A description guess for an item that is not in the list: the label's text minus the
+        brand line, the keyword line and the number itself (labels often carry the item's name).
+        Returns "" when nothing useful is left."""
+        out = []
+        for ln in (text or "").splitlines():
+            ln = ln.strip()
+            if not ln or self.has_brand(ln) or self.has_keyword(ln):
+                continue
+            if number and normalize_number(ln.replace(" ", "")) == normalize_number(number):
+                continue
+            if re.fullmatch(r"[\d.\s/:-]+", ln):
+                continue
+            out.append(ln)
+        guess = " ".join(out).strip()
+        return guess[:60]
+
     def parse_operator(self, text: str) -> str:
         """The person named by a badge code such as ``OP: Anna``, else ""."""
         if not self.operator_regex or not text or not text.strip():
