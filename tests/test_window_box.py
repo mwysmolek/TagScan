@@ -239,6 +239,25 @@ def test_tap_to_scan_flow(app, tmp_path):
     assert win.store.count() == 0 and not (tmp_path / "data" / "photos" / photo).exists()
     assert win.store.db.execute("SELECT outcome, final_number FROM reads ORDER BY id DESC LIMIT 1").fetchone() == ("deleted", "123456")
 
+    # 5b. several lists: the file name is the Kostenstelle and lands on the scan
+    lists = tmp_path / "lists"
+    lists.mkdir()
+    (lists / "KST-100.csv").write_text("No;Description\n123456;item one\n", encoding="utf-8")
+    (lists / "KST-200.csv").write_text("No;Description\n234567;item two\n", encoding="utf-8")
+    from tagscan.profile import ListSpec
+    win.profile.list = ListSpec(description_columns=[2])
+    win.load_lists([str(p) for p in Catalog.list_files(lists)], None, str(lists))
+    assert "2 lists" in win.engine_lbl.text() and win.catalog.kst_of("234567") == "KST-200"
+    win.worker.scanner.suppress("234567", 0.0)
+    for k in "234567":
+        win.card.pad._press(k)
+    win.card.pad._press("✓")
+    QCoreApplication.processEvents()
+    s = win.store.recent(1)[0]
+    assert s.number == "234567" and s.in_list and s.kst == "KST-200"
+    files = win.store.export_all(tmp_path / "data" / "TagScan_t.xlsx", win.catalog)
+    assert sorted(f.name for f in files) == ["TagScan_t.xlsx", "TagScan_t_KST-100.xlsx", "TagScan_t_KST-200.xlsx"]
+
     # 6. a new inventory archives everything and the window keeps working on the fresh store
     reads_before = sum(win.store.read_counts().values())
     assert reads_before > 0

@@ -284,8 +284,13 @@ class MainWindow(QMainWindow):
             tb.addWidget(mark)
             tb.addSeparator()
         self.list_btn = QPushButton("List …")
+        self.list_btn.setToolTip("One list file, or a folder of lists: one file per Kostenstelle")
         self.list_btn.clicked.connect(self.choose_list)
         tb.addWidget(self.list_btn)
+        self.lists_btn = QPushButton("Lists folder …")
+        self.lists_btn.setToolTip("Load every list in a folder; each file name is its Kostenstelle")
+        self.lists_btn.clicked.connect(self.choose_lists_folder)
+        tb.addWidget(self.lists_btn)
         self.sheet_box = QComboBox()
         self.sheet_box.setMinimumWidth(170)
         self.sheet_box.currentTextChanged.connect(self._sheet_changed)
@@ -436,6 +441,10 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ list / profile
     def _restore_list(self):
+        folder = self.settings.value("lists_dir", "")
+        if folder and Path(folder).is_dir() and Catalog.list_files(folder):
+            self.load_lists([str(p) for p in Catalog.list_files(folder)], self.settings.value("sheet", None), folder)
+            return
         path = self.settings.value("list_path", "")
         if path and Path(path).exists():
             self.load_list(path, self.settings.value("sheet", None))
@@ -445,9 +454,25 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Choose the list of known numbers", start,
                                               "Lists (*.xlsx *.xlsm *.csv *.txt);;All files (*)")
         if path:
+            self.settings.setValue("lists_dir", "")
             self.load_list(path, None)
 
-    def load_list(self, path: str, sheet: str | None):
+    def choose_lists_folder(self):
+        start = self.settings.value("lists_dir", "") or self.settings.value("list_path", "") or str(Path.home())
+        folder = QFileDialog.getExistingDirectory(self, "Folder with one list per Kostenstelle", start)
+        if not folder:
+            return
+        files = Catalog.list_files(folder)
+        if not files:
+            QMessageBox.warning(self, "Lists", f"No list files (xlsx, csv) in\n{folder}")
+            return
+        self.load_lists([str(p) for p in files], None, folder)
+
+    def load_lists(self, paths: list, sheet: str | None, folder: str = ""):
+        """Several lists, the file name being the Kostenstelle (cost centre) of its items."""
+        self.load_list(paths[0], sheet, paths=paths, folder=folder)
+
+    def load_list(self, path: str, sheet: str | None, paths: list | None = None, folder: str = ""):
         prof = Profile.find_near(path)
         if prof:
             self.profile = prof
@@ -461,6 +486,7 @@ class MainWindow(QMainWindow):
         spec = self.profile.list
         if sheet:
             spec.sheet = sheet
+        paths = list(paths or [path])
         self.sheet_box.blockSignals(True)
         self.sheet_box.clear()
         if path.lower().endswith((".xlsx", ".xlsm")):
@@ -475,22 +501,35 @@ class MainWindow(QMainWindow):
             self.sheet_box.hide()
         self.sheet_box.blockSignals(False)
         try:
-            self.catalog = Catalog.load(path, spec)
+            self.catalog = Catalog.load_many(paths, spec) if len(paths) > 1 else Catalog.load(path, spec)
         except Exception as ex:
             log.exception("list load failed")
             QMessageBox.warning(self, "List", f"Could not read the list:\n{ex}")
             return
         self.worker.set_catalog(self.catalog)
         self.settings.setValue("list_path", path)
+        self.settings.setValue("lists_dir", folder or "")
         self.settings.setValue("sheet", spec.sheet or "")
-        self.list_btn.setText(f"List: {Path(path).name}")
-        self.engine_lbl.setText(f"{len(self.catalog)} items · profile {self.profile.name}"
+        ksts = self.catalog.kst_names()
+        if len(paths) > 1:
+            self.list_btn.setText(f"Lists: {len(paths)} Kostenstellen")
+            what = f"{len(self.catalog)} items in {len(paths)} lists ({', '.join(ksts[:6])}{' …' if len(ksts) > 6 else ''})"
+            if self.catalog.duplicates:
+                what += f", {self.catalog.duplicates} numbers in more than one list"
+        else:
+            self.list_btn.setText(f"List: {Path(path).name}")
+            what = f"{len(self.catalog)} items"
+        self.engine_lbl.setText(f"{what} · profile {self.profile.name}"
                                 + ("" if prof else " (no tagscan_profile.json next to the list: generic profile)"))
+        log.info("lists loaded: %s", what)
         self._refresh_history()
 
     def _sheet_changed(self, name: str):
         path = self.settings.value("list_path", "")
-        if name and path:
+        folder = self.settings.value("lists_dir", "")
+        if name and folder and Path(folder).is_dir():
+            self.load_lists([str(p) for p in Catalog.list_files(folder)], name, folder)
+        elif name and path:
             self.load_list(path, name)
 
     def _lookup(self, number: str):
@@ -932,7 +971,7 @@ class MainWindow(QMainWindow):
             description = self._ask_description(number, guess)
             note = (note + "; " if note else "") + "new item"
         scan = self.store.add(number, description, self.location_text, source, in_list, image=frame, note=note,
-                              operator=self.operator_text)
+                              operator=self.operator_text, kst=self.catalog.kst_of(number))
         log.info("scan %s %s %s in_list=%s outcome=%s by %r at %r", scan.id, number, source, in_list, outcome,
                  self.operator_text, self.location_text)
         if not self.operator_text:
@@ -1048,8 +1087,8 @@ class MainWindow(QMainWindow):
             return
         if choice["v"] == "export":
             try:
-                out = self.store.export_xlsx(self.data_dir / self.store.default_export_name(self.operator_text), self.catalog)
-                log.info("exported %s before the new inventory", out)
+                out = self.store.export_all(self.data_dir / self.store.default_export_name(self.operator_text), self.catalog)
+                log.info("exported %s before the new inventory", ", ".join(str(f) for f in out))
             except Exception as ex:
                 log.exception("export before new inventory failed")
                 QMessageBox.warning(self, "Export", f"Export failed, nothing archived:\n{ex}")
@@ -1068,12 +1107,14 @@ class MainWindow(QMainWindow):
         if not path:
             return
         try:
-            out = self.store.export_xlsx(path, self.catalog)
+            files = self.store.export_all(path, self.catalog)
         except Exception as ex:
             log.exception("export failed")
             QMessageBox.warning(self, "Export", f"Export failed:\n{ex}")
             return
-        self.statusBar().showMessage(f"exported {out}", 8000)
+        more = f" + {len(files) - 1} per Kostenstelle" if len(files) > 1 else ""
+        self.statusBar().showMessage(f"exported {files[0]}{more}", 8000)
+        log.info("exported %s", ", ".join(str(f) for f in files))
 
     def closeEvent(self, ev):
         self._stats_timer.stop()

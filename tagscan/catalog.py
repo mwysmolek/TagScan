@@ -26,6 +26,7 @@ class Item:
     description: str = ""
     extra: list = field(default_factory=list)
     location: str = ""            # from the profile's location_column, if any
+    kst: str = ""                 # Kostenstelle: the name of the list file the item came from
 
 
 @dataclass
@@ -33,6 +34,7 @@ class Catalog:
     items: dict[str, Item] = field(default_factory=dict)
     headers: list[str] = field(default_factory=list)
     source: str = ""
+    duplicates: int = 0           # numbers that appeared in more than one list (the first one wins)
 
     def __len__(self) -> int:
         return len(self.items)
@@ -42,6 +44,14 @@ class Catalog:
 
     def get(self, number) -> Item | None:
         return self.items.get(normalize_number(number))
+
+    def kst_names(self) -> list[str]:
+        """The Kostenstellen (list files) the items came from, in loading order."""
+        return list(dict.fromkeys(it.kst for it in self.items.values() if it.kst))
+
+    def kst_of(self, number) -> str:
+        it = self.get(number)
+        return it.kst if it else ""
 
     def locations(self) -> list[str]:
         """Distinct locations named in the list (profile ``list.location_column``), naturally sorted."""
@@ -71,12 +81,43 @@ class Catalog:
 
     # ------------------------------------------------------------------ loading
     @classmethod
-    def load(cls, path: str | Path, spec: ListSpec | None = None) -> "Catalog":
+    def load(cls, path: str | Path, spec: ListSpec | None = None, kst: str | None = None) -> "Catalog":
+        """One list. ``kst`` (Kostenstelle) defaults to the file name without extension."""
         spec = spec or ListSpec()
         path = Path(path)
-        if path.suffix.lower() in (".xlsx", ".xlsm"):
-            return cls._load_xlsx(path, spec)
-        return cls._load_csv(path, spec)
+        cat = cls._load_xlsx(path, spec) if path.suffix.lower() in (".xlsx", ".xlsm") else cls._load_csv(path, spec)
+        name = path.stem if kst is None else kst
+        for it in cat.items.values():
+            it.kst = name
+        return cat
+
+    @classmethod
+    def load_many(cls, paths, spec: ListSpec | None = None) -> "Catalog":
+        """Several lists, one per Kostenstelle (the file name). A number in two lists keeps the
+        first one and is counted in ``duplicates``."""
+        paths = [Path(p) for p in paths]
+        cat = cls(source="; ".join(str(p) for p in paths))
+        for path in paths:
+            part = cls.load(path, spec)
+            if not cat.headers:
+                cat.headers = part.headers
+            for key, it in part.items.items():
+                if key in cat.items:
+                    cat.duplicates += 1
+                    continue
+                cat.items[key] = it
+        return cat
+
+    @staticmethod
+    def list_files(folder: str | Path) -> list[Path]:
+        """The list files in a folder: xlsx/xlsm/csv/txt, not temporary (~$) or exported ones."""
+        folder = Path(folder)
+        out = []
+        for p in sorted(folder.iterdir()):
+            if p.is_file() and p.suffix.lower() in (".xlsx", ".xlsm", ".csv", ".txt") \
+                    and not p.name.startswith("~$") and not p.name.startswith("TagScan_"):
+                out.append(p)
+        return out
 
     @staticmethod
     def sheet_names(path: str | Path) -> list[str]:
@@ -92,7 +133,7 @@ class Catalog:
         from openpyxl import load_workbook
         wb = load_workbook(path, read_only=True, data_only=True)
         try:
-            ws = wb[spec.sheet] if spec.sheet and spec.sheet in wb.sheetnames else wb[wb.sheetnames[0]]
+            ws = wb[spec.sheet] if spec.sheet and spec.sheet in wb.sheetnames else wb[wb.sheetnames[0]]   # sheet missing: first
             cat = cls(source=str(path))
             ncol = max([spec.number_column, *spec.description_columns])
             for i, row in enumerate(ws.iter_rows(min_row=1, max_col=ncol, values_only=True), start=1):

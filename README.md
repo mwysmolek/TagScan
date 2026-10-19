@@ -25,11 +25,14 @@ tablet held in landscape with both hands: SCAN, OK, Correct and DISCARD sit at t
 right edge at thumb height, the number pad under the right thumb, the picture and the result
 in the middle, and the once-a-day setup (list, operator, location, export) in the toolbar.
 
-1. **List …** choose the Excel/CSV with the known numbers (and the sheet). A
-   `tagscan_profile.json` next to the list is picked up automatically and tells TagScan
-   what your labels look like (brand words, keyword in front of the number, how many
-   digits, which columns hold number, description and location). Without one a generic
-   profile is used.
+1. **List …** choose the Excel/CSV with the known numbers (and the sheet), or **Lists
+   folder …** to load every list in a folder at once: one file per Kostenstelle (cost
+   centre), the file name being the Kostenstelle. Items remember which list they came from,
+   every scan records it, and the export writes one workbook per Kostenstelle next to the
+   overall one. A `tagscan_profile.json` next to the list(s) is picked up automatically and
+   tells TagScan what your labels look like (brand words, keyword in front of the number,
+   how many digits, which columns hold number, description and location). Without one a
+   generic profile is used.
 2. **Operator:** tap the operator button and type your code (`123ab` or whatever your site
    uses) on the digits-and-letters pad; recent codes are one tap. The profile can hold a
    pattern (`operator_pattern`, e.g. `\d{3}[a-z]{2}`) so a typo is refused on the spot, and
@@ -55,9 +58,12 @@ in the middle, and the once-a-day setup (list, operator, location, export) in th
    the recent strip removes a scan that slipped through.
 7. Recent scans sit at the bottom: tap one to delete it or change its location.
 8. **Export Excel**: sheets *Scans*, *List status* (found / missing per list item) and
-   *Not in list*, each with location and operator; the file is named after device and
-   operator. Photos sit in `photos\<location>\<yyyymmdd>_<number>.jpg`, so the archive can
-   be browsed by room without the spreadsheet.
+   *Not in list*, each with Kostenstelle, location and operator; the file is named after
+   device and operator. With several lists, one more workbook per Kostenstelle
+   (`…_<Kostenstelle>.xlsx`) is written next to it with that list's items and scans; new
+   items (not in any list) are only in the overall workbook. Photos sit in
+   `photos\<location>\<yyyymmdd>_<number>.jpg`, so the archive can be browsed by room
+   without the spreadsheet.
 9. **New inventory …** moves the scans, photos, training data and exports of the finished
    inventory to `archive\<date_time>\` (optionally exporting first) and starts empty; list,
    operator and location are kept.
@@ -81,6 +87,15 @@ the memory the app uses; include it in a bug report.
 `profiles/example.json` documents every field. Copy it next to your list as
 `tagscan_profile.json` and adapt the patterns. Regexes are case-insensitive; include the
 OCR-mangled variants of your keyword (missing first letters are common).
+
+## Antivirus
+
+The portable build is not code-signed, so every release is a new, unknown executable and an
+antivirus may flag one release and not the next. The build compiles PyInstaller's bootloader
+on the runner, which avoids the most common false positive. If a release is still blocked:
+report it as a false positive to the antivirus vendor, have the TagScan folder whitelisted,
+or sign `tagscan.exe` with a company certificate (the build can do that given the
+certificate).
 
 ## From source
 
