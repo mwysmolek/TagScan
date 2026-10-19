@@ -232,9 +232,9 @@ def test_store_photo_layout_operator_and_migration(tmp_path):
     out = st.export_xlsx(tmp_path / "out.xlsx", Catalog(items={"1001": Item("1001", "1001", "Cart")}))
     wb = load_workbook(out)
     rows = list(wb["Scans"].iter_rows(values_only=True))
-    assert rows[0][:4] == ("Number", "Description", "Location", "Operator") and rows[1][3] == "Anna"
+    assert rows[0][:5] == ("Number", "Description", "Kostenstelle", "Location", "Operator") and rows[1][4] == "Anna"
     status = list(wb["List status"].iter_rows(values_only=True))
-    assert status[0][4] == "Operator" and status[1][2] == "found" and status[1][4] == "Anna"
+    assert status[0][5] == "Operator" and status[1][3] == "found" and status[1][5] == "Anna"
     assert list(wb["Not in list"].iter_rows(values_only=True))[1][3] in ("", None)   # empty cell reads back as None
     assert "_Anna_" in st.default_export_name("Anna") and "__" not in st.default_export_name("")
 
@@ -264,3 +264,47 @@ def test_describe_guess_from_label_text():
     assert p.describe("ACME\nASSET NO.\n123456", "123456") == ""
     assert p.describe("", "1") == "" and p.describe("12.03.2024\n123456\nMonitor 27", "123456") == "Monitor 27"
     assert len(p.describe("x" * 200, "")) == 60
+
+
+def test_catalog_many_lists_kostenstelle(tmp_path):
+    (tmp_path / "KST-100.csv").write_text("No;Description\n1001;Cart\n1002;Monitor\n", encoding="utf-8")
+    (tmp_path / "KST-200.csv").write_text("No;Description\n2001;Laptop\n1002;Monitor again\n", encoding="utf-8")
+    (tmp_path / "~$KST-200.csv").write_text("junk", encoding="utf-8")
+    (tmp_path / "TagScan_dev_export.xlsx").write_bytes(b"not a list")
+    files = Catalog.list_files(tmp_path)
+    assert [f.name for f in files] == ["KST-100.csv", "KST-200.csv"]
+    cat = Catalog.load_many(files, ListSpec(description_columns=[2]))
+    assert len(cat) == 3 and cat.kst_names() == ["KST-100", "KST-200"] and cat.duplicates == 1
+    assert cat.kst_of("1001") == "KST-100" and cat.kst_of("2001") == "KST-200" and cat.kst_of("1002") == "KST-100"
+    assert cat.get("1002").description == "Monitor" and cat.kst_of("9999") == ""
+    single = Catalog.load(tmp_path / "KST-100.csv", ListSpec(description_columns=[2]))
+    assert single.kst_names() == ["KST-100"]
+
+
+def test_store_export_per_kostenstelle(tmp_path):
+    from openpyxl import load_workbook
+    from tagscan.store import Store
+    (tmp_path / "A.csv").write_text("No;Description\n1001;Cart\n1002;Monitor\n", encoding="utf-8")
+    (tmp_path / "B.csv").write_text("No;Description\n2001;Laptop\n", encoding="utf-8")
+    cat = Catalog.load_many(Catalog.list_files(tmp_path), ListSpec(description_columns=[2]))
+    st = Store(tmp_path / "data")
+    st.add("1001", "Cart", "Hall 2", "QR", True, operator="456cd", kst=cat.kst_of("1001"))
+    st.add("2001", "Laptop", "Hall 3", "OCR", True, operator="456cd", kst=cat.kst_of("2001"))
+    st.add("9999", "new thing", "Hall 3", "MANUAL", False, operator="456cd", kst="")
+    assert st.recent(3)[2].kst == "A" and st.recent(3)[0].kst == ""
+    files = st.export_all(tmp_path / "data" / "TagScan_dev_x.xlsx", cat)
+    assert [f.name for f in files] == ["TagScan_dev_x.xlsx", "TagScan_dev_x_A.xlsx", "TagScan_dev_x_B.xlsx"]
+    wb = load_workbook(files[0])
+    scans = list(wb["Scans"].iter_rows(values_only=True))
+    assert scans[0][2] == "Kostenstelle" and {r[2] or "" for r in scans[1:]} == {"A", "B", ""}
+    status = list(wb["List status"].iter_rows(values_only=True))
+    assert len(status) == 4 and {r[2] for r in status[1:]} == {"A", "B"} and [r[3] for r in status[1:]] == ["found", "missing", "found"]
+    assert len(list(wb["Not in list"].iter_rows(values_only=True))) == 2
+    wa = load_workbook(files[1])
+    assert [r[0] for r in list(wa["Scans"].iter_rows(values_only=True))[1:]] == ["1001"]
+    assert [r[3] for r in list(wa["List status"].iter_rows(values_only=True))[1:]] == ["found", "missing"]
+    assert "Not in list" not in wa.sheetnames
+    wb_b = load_workbook(files[2])
+    assert [r[0] for r in list(wb_b["List status"].iter_rows(values_only=True))[1:]] == ["2001"]
+    # a database from before 0.6 gets the column
+    assert "kst" in [r[1] for r in st.db.execute("PRAGMA table_info(scans)")]

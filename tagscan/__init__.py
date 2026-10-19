@@ -1,2 +1,2 @@
 """kayEi TagScan: camera scanner for inventory labels (codes + printed text) matched against a list."""
-__version__ = "0.5.1"
+__version__ = "0.6.0"

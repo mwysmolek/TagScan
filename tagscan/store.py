@@ -28,6 +28,7 @@ class Scan:
     device: str
     note: str = ""
     operator: str = ""
+    kst: str = ""                 # Kostenstelle of the list the number was found in
 
 
 def safe_name(text: str, fallback: str = "unknown", limit: int = 60) -> str:
@@ -48,7 +49,7 @@ class Store:
         self.db.execute("""CREATE TABLE IF NOT EXISTS scans(
             id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, number TEXT, description TEXT,
             location TEXT, source TEXT, in_list INTEGER, photo TEXT, device TEXT, note TEXT DEFAULT '',
-            operator TEXT DEFAULT '')""")
+            operator TEXT DEFAULT '', kst TEXT DEFAULT '')""")
         # every read the operator decided on, right or wrong: training data for a label detector
         # (frame + box + text boxes) and for OCR tuning (crop + the number that was actually there)
         self.db.execute("""CREATE TABLE IF NOT EXISTS reads(
@@ -58,6 +59,7 @@ class Store:
             operator TEXT DEFAULT '')""")
         self._ensure_column("scans", "operator", "TEXT DEFAULT ''")      # databases from 0.1 / 0.2
         self._ensure_column("reads", "operator", "TEXT DEFAULT ''")
+        self._ensure_column("scans", "kst", "TEXT DEFAULT ''")           # databases before 0.6
         self.db.commit()
         (self.folder / "training" / "crops").mkdir(parents=True, exist_ok=True)
         (self.folder / "training" / "frames").mkdir(parents=True, exist_ok=True)
@@ -81,18 +83,18 @@ class Store:
         return rel
 
     def add(self, number: str, description: str, location: str, source: str, in_list: bool,
-            image=None, note: str = "", operator: str = "") -> Scan:
+            image=None, note: str = "", operator: str = "", kst: str = "") -> Scan:
         ts = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         photo = ""
         if image is not None:
             import cv2
             photo = self.photo_path(number, location)
             cv2.imwrite(str(self.folder / "photos" / photo), image, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
-        cur = self.db.execute("INSERT INTO scans(ts,number,description,location,source,in_list,photo,device,note,operator)"
-                              " VALUES(?,?,?,?,?,?,?,?,?,?)",
-                              (ts, number, description, location, source, int(in_list), photo, self.device, note, operator))
+        cur = self.db.execute("INSERT INTO scans(ts,number,description,location,source,in_list,photo,device,note,operator,kst)"
+                              " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                              (ts, number, description, location, source, int(in_list), photo, self.device, note, operator, kst))
         self.db.commit()
-        return Scan(cur.lastrowid, ts, number, description, location, source, in_list, photo, self.device, note, operator)
+        return Scan(cur.lastrowid, ts, number, description, location, source, in_list, photo, self.device, note, operator, kst)
 
     def add_read(self, outcome: str, final_number: str = "", source: str = "", ocr_number: str = "",
                  ocr_text: str = "", ocr_level: str = "", ocr_boxes=None, roi: dict | None = None,
@@ -161,11 +163,12 @@ class Store:
         self.db.commit()
 
     # ------------------------------------------------------------------ reads
-    _COLS = "id,ts,number,description,location,source,in_list,photo,device,note,operator"
+    _COLS = "id,ts,number,description,location,source,in_list,photo,device,note,operator,kst"
 
     def _rows(self, sql, args=()) -> list[Scan]:
         cur = self.db.execute(sql, args)
-        return [Scan(r[0], r[1], r[2], r[3], r[4], r[5], bool(r[6]), r[7], r[8], r[9], r[10] or "") for r in cur.fetchall()]
+        return [Scan(r[0], r[1], r[2], r[3], r[4], r[5], bool(r[6]), r[7], r[8], r[9], r[10] or "", r[11] or "")
+                for r in cur.fetchall()]
 
     def recent(self, n: int = 12) -> list[Scan]:
         return self._rows(f"SELECT {self._COLS} FROM scans ORDER BY id DESC LIMIT ?", (n,))
@@ -180,44 +183,63 @@ class Store:
         return self._rows(f"SELECT {self._COLS} FROM scans WHERE number=? ORDER BY id", (number,))
 
     # ------------------------------------------------------------------ export
-    def export_xlsx(self, path: str | Path, catalog: Catalog | None = None) -> Path:
+    def export_xlsx(self, path: str | Path, catalog: Catalog | None = None, kst: str | None = None) -> Path:
+        """The workbook: sheets Scans, List status (found / missing per list item) and Not in
+        list. With ``kst`` only that Kostenstelle's items and scans (Not in list is left out:
+        a new item has no Kostenstelle yet; it is in the overall workbook)."""
         from openpyxl import Workbook
         from openpyxl.styles import Font, PatternFill
         from openpyxl.utils import get_column_letter
 
+        scans = [s for s in self.all() if kst is None or s.kst == kst]
+        items = [it for it in (catalog.items.values() if catalog else []) if kst is None or it.kst == kst]
         wb = Workbook()
         ws = wb.active
         ws.title = "Scans"
-        head = ["Number", "Description", "Location", "Operator", "Time", "Source", "In list", "Photo", "Device", "Note"]
+        head = ["Number", "Description", "Kostenstelle", "Location", "Operator", "Time", "Source", "In list",
+                "Photo", "Device", "Note"]
         ws.append(head)
-        for s in self.all():
-            ws.append([s.number, s.description, s.location, s.operator, s.ts, s.source, "yes" if s.in_list else "no",
-                       s.photo, s.device, s.note])
+        for s in scans:
+            ws.append([s.number, s.description, s.kst, s.location, s.operator, s.ts, s.source,
+                       "yes" if s.in_list else "no", s.photo, s.device, s.note])
         _style(ws, head, Font, PatternFill, get_column_letter)
 
-        if catalog and len(catalog):
-            found = {s.number for s in self.all()}
+        if items:
             ws2 = wb.create_sheet("List status")
-            head2 = ["Number", "Description", "Status", "Location", "Operator", "Time", "Device"]
+            head2 = ["Number", "Description", "Kostenstelle", "Status", "Location", "Operator", "Time", "Device"]
             ws2.append(head2)
             last = {}
-            for s in self.all():
+            for s in scans:
                 last[s.number] = s
-            for it in catalog.items.values():
+            for it in items:
                 s = last.get(it.key)
-                ws2.append([it.number, it.description, "found" if s else "missing",
+                ws2.append([it.number, it.description, it.kst, "found" if s else "missing",
                             s.location if s else "", s.operator if s else "", s.ts if s else "", s.device if s else ""])
             _style(ws2, head2, Font, PatternFill, get_column_letter)
+        if kst is None:
             ws3 = wb.create_sheet("Not in list")
             head3 = ["Number", "Description", "Location", "Operator", "Time", "Source", "Photo", "Device", "Note"]
             ws3.append(head3)
-            for s in self.all():
+            for s in scans:
                 if not s.in_list:
                     ws3.append([s.number, s.description, s.location, s.operator, s.ts, s.source, s.photo, s.device, s.note])
             _style(ws3, head3, Font, PatternFill, get_column_letter)
         path = Path(path)
         wb.save(path)
         return path
+
+    def export_all(self, path: str | Path, catalog: Catalog | None = None) -> list[Path]:
+        """The overall workbook at ``path`` plus one workbook per Kostenstelle next to it
+        (``<path stem>_<Kostenstelle>.xlsx``). Returns every file written."""
+        path = Path(path)
+        out = [self.export_xlsx(path, catalog)]
+        names = list(catalog.kst_names()) if catalog else []
+        for s in self.all():
+            if s.kst and s.kst not in names:
+                names.append(s.kst)
+        for name in names:
+            out.append(self.export_xlsx(path.with_name(f"{path.stem}_{safe_name(name, 'KST')}.xlsx"), catalog, kst=name))
+        return out
 
     def default_export_name(self, operator: str = "") -> str:
         who = f"_{safe_name(operator, '')}" if safe_name(operator, "") else ""
@@ -228,8 +250,8 @@ def _style(ws, head, Font, PatternFill, get_column_letter):
     for c in ws[1]:
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = PatternFill(start_color="2F5496", end_color="2F5496", fill_type="solid")
-    widths = {"Number": 12, "Description": 48, "Location": 18, "Operator": 16, "Time": 20, "Source": 9, "In list": 8,
-              "Photo": 36, "Device": 16, "Note": 30, "Status": 9}
+    widths = {"Number": 12, "Description": 48, "Kostenstelle": 16, "Location": 18, "Operator": 16, "Time": 20,
+              "Source": 9, "In list": 8, "Photo": 36, "Device": 16, "Note": 30, "Status": 9}
     for i, h in enumerate(head, start=1):
         ws.column_dimensions[get_column_letter(i)].width = widths.get(h, 14)
     ws.freeze_panes = "A2"
