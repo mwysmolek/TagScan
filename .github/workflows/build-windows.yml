@@ -99,7 +99,7 @@ jobs:
           path: |
             dist/kayEi-TagScan-portable-*.zip
             dist/SHA256SUMS.txt
-          retention-days: 14
+          retention-days: 3   # ~155 MB per run; each new version is kept as a release
 
       - name: Publish release (version tag, a new version on main, or a manual run with 'release' ticked)
         if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && steps.ver.outputs.untagged == 'true') || (github.event_name == 'workflow_dispatch' && inputs.release)
