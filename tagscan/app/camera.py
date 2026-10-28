@@ -16,7 +16,7 @@ import time
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QObject, Signal, QTimer, Qt
+from PySide6.QtCore import QObject, Signal, QTimer, Qt, qVersion
 from PySide6.QtGui import QImage
 from PySide6.QtMultimedia import (QCamera, QMediaCaptureSession, QMediaDevices, QVideoSink, QVideoFrame,
                                   QVideoFrameFormat)
@@ -105,8 +105,7 @@ def _degrees(rot) -> int:
 
 def surface_transform(frame: QVideoFrame) -> tuple[int, bool, bool]:
     """(clockwise degrees, mirror horizontally, flip vertically) from the surface format. Qt
-    applies these in QVideoFrame.toImage() and when presenting, in exactly this order:
-    mirror, then rotate, then the bottom-to-top scan-line flip (checked against toImage)."""
+    applies these in QVideoFrame.toImage() and when presenting in the order SURFACE_ORDER."""
     fmt = frame.surfaceFormat()
     flip = False
     try:
@@ -128,17 +127,31 @@ def frame_transform(frame: QVideoFrame) -> tuple[tuple[int, bool, bool], tuple[i
     return surface_transform(frame), presentation_transform(frame)
 
 
-def apply_transform(bgr: np.ndarray, angle: int, mirror: bool, flip: bool = False) -> np.ndarray:
-    if mirror:
-        bgr = cv2.flip(bgr, 1)
-    if angle == 90:
-        bgr = cv2.rotate(bgr, cv2.ROTATE_90_CLOCKWISE)
-    elif angle == 180:
-        bgr = cv2.rotate(bgr, cv2.ROTATE_180)
-    elif angle == 270:
-        bgr = cv2.rotate(bgr, cv2.ROTATE_90_COUNTERCLOCKWISE)
-    if flip:
-        bgr = cv2.flip(bgr, 0)
+def _qt_version() -> tuple[int, ...]:
+    try:
+        return tuple(int(x) for x in qVersion().split(".")[:3])
+    except Exception:
+        return (0,)
+
+
+# The order in which QVideoFrame.toImage() applies the surface format's mirror (M), rotation (R)
+# and bottom-to-top scan-line flip (F). Up to Qt 6.11.2 it is mirror, rotate, flip. From 6.11.3
+# the scan lines are read bottom-up first and the mirror comes after the rotation, the way Qt's
+# own VideoTransformation names it. Both measured against toImage() for all 16 combinations
+# (tests/test_camera.py); the order only matters when a 90/270 rotation meets a mirror or flip.
+SURFACE_ORDER = "FRM" if _qt_version() >= (6, 11, 3) else "MRF"
+_ROTATE = {90: cv2.ROTATE_90_CLOCKWISE, 180: cv2.ROTATE_180, 270: cv2.ROTATE_90_COUNTERCLOCKWISE}
+
+
+def apply_transform(bgr: np.ndarray, angle: int, mirror: bool, flip: bool = False,
+                    order: str = SURFACE_ORDER) -> np.ndarray:
+    for step in order:
+        if step == "M" and mirror:
+            bgr = cv2.flip(bgr, 1)
+        elif step == "R" and angle in _ROTATE:
+            bgr = cv2.rotate(bgr, _ROTATE[angle])
+        elif step == "F" and flip:
+            bgr = cv2.flip(bgr, 0)
     return bgr
 
 
@@ -156,9 +169,10 @@ def frame_to_bgr(frame: QVideoFrame) -> np.ndarray | None:
         finally:
             frame.unmap()
         if bgr is not None:
-            return apply_transform(apply_transform(bgr, *surface_transform(frame)), *presentation_transform(frame))
+            bgr = apply_transform(bgr, *surface_transform(frame))
+            return apply_transform(bgr, *presentation_transform(frame), order="MRF")  # as a video sink
     img = frame.toImage()                      # applies the surface transform itself
-    return None if img.isNull() else apply_transform(qimage_to_bgr(img), *presentation_transform(frame))
+    return None if img.isNull() else apply_transform(qimage_to_bgr(img), *presentation_transform(frame), order="MRF")
 
 
 # ---------------------------------------------------------------------------- sources
