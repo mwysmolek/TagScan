@@ -128,7 +128,7 @@ def _rotation_enum(deg):
 @pytest.mark.parametrize("flip", [False, True])
 def test_surface_transform_matches_qt(app, deg, mirror, flip):
     """Rotation, mirroring and scan-line direction from the surface format come out exactly as
-    Qt's own toImage() applies them (order: mirror, rotate, flip)."""
+    Qt's own toImage() applies them (SURFACE_ORDER: changed in Qt 6.11.3)."""
     bgr = _test_bgr(64, 32)
     fmt = QVideoFrameFormat(QSize(64, 32), PF.Format_BGRA8888)
     fmt.setRotation(_rotation_enum(deg))
