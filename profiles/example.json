@@ -24,5 +24,13 @@
   "box_width": 0.6,
   "ocr_fail_passes": 3,
   "scan_trigger": "tap",
-  "trigger_window": 3.0
+  "trigger_window": 3.0,
+  "print_labels": "ask",
+  "label_printer": "Brother PT",
+  "label_tape_mm": 24.0,
+  "label_length_mm": 60.0,
+  "label_dpi": 180,
+  "label_brand_line": "ACME",
+  "label_keyword_line": "ASSET NO.",
+  "label_qr_template": "{brand}\n{keyword}\n{number}\n{description}"
 }

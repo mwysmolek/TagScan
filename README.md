@@ -64,7 +64,15 @@ in the middle, and the once-a-day setup (list, operator, location, export) in th
    items (not in any list) are only in the overall workbook. Photos sit in
    `photos\<location>\<yyyymmdd>_<number>.jpg`, so the archive can be browsed by room
    without the spreadsheet.
-9. **New inventory …** moves the scans, photos, training data and exports of the finished
+9. **Print QR label**: an item confirmed from printed text or typed by hand has no code, so
+   after the confirm a *Print QR label* button appears (profile `print_labels`: `ask`,
+   `auto`, `off`). The label carries a QR with the same payload TagScan reads (brand line,
+   keyword line, number, description from the list) and the text beside it, sized for the
+   tape (`label_tape_mm`, `label_length_mm`, `label_dpi`). It goes to the first printer whose
+   name contains `label_printer` (default `Brother PT`) through the system's printer driver,
+   which cuts after the label; USB or Bluetooth is the driver's business. Any scan in the
+   recent strip can be printed again from its menu.
+10. **New inventory …** moves the scans, photos, training data and exports of the finished
    inventory to `archive\<date_time>\` (optionally exporting first) and starts empty; list,
    operator and location are kept.
 

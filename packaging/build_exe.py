@@ -83,6 +83,7 @@ def build(onefile: bool = False, console: bool = False) -> None:
         "--collect-binaries", "zxingcpp",
         "--hidden-import", "PySide6.QtMultimedia",
         "--hidden-import", "PySide6.QtNetwork",
+        "--hidden-import", "PySide6.QtPrintSupport",
         "--copy-metadata", "numpy", "--copy-metadata", "openpyxl",
         *[x for m in excludes for x in ("--exclude-module", m)],
         "--distpath", str(ROOT / "dist"),

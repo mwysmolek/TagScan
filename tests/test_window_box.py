@@ -239,6 +239,19 @@ def test_tap_to_scan_flow(app, tmp_path):
     assert win.store.count() == 0 and not (tmp_path / "data" / "photos" / photo).exists()
     assert win.store.db.execute("SELECT outcome, final_number FROM reads ORDER BY id DESC LIMIT 1").fetchone() == ("deleted", "123456")
 
+    # 4c. an item confirmed without a code offers a QR label; with no such printer it says so
+    win.profile.label_printer = "no such printer xyz"
+    for k in "123456":
+        win.card.pad._press(k)
+    win.card.pad._press("✓")
+    QCoreApplication.processEvents()
+    assert not win.card.print_btn.isHidden() and "123456" in win.card.print_btn.text()
+    win.card.print_btn.click()
+    QCoreApplication.processEvents()
+    assert win.card.print_btn.isHidden() and "no printer" in win.statusBar().currentMessage()
+    win.store.delete(win.store.recent(1)[0].id)
+    win.worker.scanner.suppress("123456", 0.0)
+
     # 5b. several lists: the file name is the Kostenstelle and lands on the scan
     lists = tmp_path / "lists"
     lists.mkdir()
