@@ -21,6 +21,8 @@ from ..profile import Profile
 from ..store import Store
 from .aim import Box, Stability, box_rect, crop_box
 from .assets import asset_path
+from . import printing
+from ..labels import render_label
 from .camera import CameraSource, FolderSource, bgr_to_qimage
 from .sysinfo import rss_mb
 from .widgets import (GREEN, ORANGE, BLUE, DescriptionPicker, HistoryStrip, LocationPicker, OperatorPicker,
@@ -353,13 +355,16 @@ class MainWindow(QMainWindow):
         self.card.undone.connect(self._undone)
         self.card.backed.connect(self._backed)
         self.card.scan_requested.connect(self._trigger)
+        self.card.print_requested.connect(self._print_last)
         self.card.state_changed.connect(self._card_state)
+        self._printable: dict | None = None     # the last confirm without a code: number + description
         if not logo.isNull():
             self.card.set_logo(logo)
         self.history = HistoryStrip()
         self.history.delete_requested.connect(self._delete_scan)
         self.history.relocate_requested.connect(self._relocate_scan)
         self.history.undo_last_requested.connect(self._undo_last)
+        self.history.print_requested.connect(self._print_scan)
 
         # left thumb column: zoom, SCAN / DISCARD, undo last scan
         left = QWidget()
@@ -381,6 +386,7 @@ class MainWindow(QMainWindow):
         lv.addWidget(self.zoom_lbl)
         lv.addWidget(self.zoom_out)
         lv.addStretch(1)
+        lv.addWidget(self.card.print_btn)
         lv.addWidget(self.card.scan_btn_left)
         lv.addWidget(self.card.discard_btn)
         lv.addStretch(1)
@@ -981,11 +987,62 @@ class MainWindow(QMainWindow):
         self._need_change = True
         self._armed = False
         self._stab.mark_read()
+        self._offer_label(scan)
         self.worker.suppress(number)
         self.worker.reset()
         self._refresh_history()
         self.view.flash(GREEN if in_list else ORANGE, 500)
         self._show_operator()
+
+    # ------------------------------------------------------------------ QR labels
+    def _offer_label(self, scan) -> None:
+        """An item confirmed from printed text or typed by hand has no code: offer (or print) a
+        QR label for it, so the next inventory scans it in a blink."""
+        mode = self.profile.print_labels
+        if mode == "off" or scan.source in ("QR", "BARCODE"):
+            self._printable = None
+            self.card.print_btn.hide()
+            return
+        self._printable = dict(id=scan.id, number=scan.number, description=scan.description)
+        if mode == "auto":
+            self._print_last()
+        else:
+            self.card.print_btn.setText(f"Print QR label  {scan.number}")
+            self.card.print_btn.show()
+
+    def _print_last(self) -> None:
+        if self._printable:
+            self._print(self._printable["number"], self._printable["description"], self._printable["id"])
+        self.card.print_btn.hide()
+
+    def _print_scan(self, sid: int) -> None:
+        for s in self.store.recent(50):
+            if s.id == sid:
+                self._print(s.number, s.description, s.id)
+                return
+
+    def _print(self, number: str, description: str, scan_id: int | None = None) -> bool:
+        try:
+            label = render_label(self.profile, number, description)
+        except Exception as ex:
+            log.exception("label rendering failed")
+            self.statusBar().showMessage(f"label failed: {ex}", 6000)
+            return False
+        info = printing.find_printer(self.profile.label_printer)
+        if info is None:
+            names = printing.printer_names()
+            self.statusBar().showMessage(f"no printer named like '{self.profile.label_printer}' "
+                                         f"(installed: {', '.join(names) or 'none'})", 8000)
+            log.warning("label printer %r not found; installed: %s", self.profile.label_printer, names)
+            return False
+        ok = printing.print_label(label, info)
+        self.statusBar().showMessage(f"label {number} sent to {info.printerName()}" if ok else "printing failed", 6000)
+        if ok and scan_id is not None:
+            row = self.store.db.execute("SELECT note FROM scans WHERE id=?", (scan_id,)).fetchone()
+            note = (row[0] + "; " if row and row[0] else "") + "label printed"
+            self.store.update(scan_id, note=note)
+            self._refresh_history()
+        return ok
 
     def _discarded(self, number):
         """Discard on a green or orange card: what was captured is wrong or unwanted."""

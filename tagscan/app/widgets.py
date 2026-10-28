@@ -266,6 +266,7 @@ class ResultCard(QFrame):
     undone = Signal(str)                           # number (Correct on a green card: wrong read, type it)
     backed = Signal(str)                           # Discard on the "type it" screen (prior number)
     scan_requested = Signal()                      # a SCAN button
+    print_requested = Signal()                     # the Print QR label button (last scan without a code)
     state_changed = Signal(str)
 
     def __init__(self, parent=None):
@@ -335,6 +336,8 @@ class ResultCard(QFrame):
         self.ok_btn = self._big("OK  ✓", "font-size:26px;font-weight:700;background:#2ea043;color:white;border-radius:14px;")
         self.fix_btn = self._big("Correct", "font-size:18px;font-weight:600;background:#f08c00;color:white;border-radius:12px;", height=64)
         self.discard_btn = self._big("DISCARD  ✗", "font-size:22px;font-weight:700;background:#d1242f;color:white;border-radius:14px;")
+        self.print_btn = self._big("Print QR label", "font-size:17px;font-weight:600;background:#3c8ce6;color:white;border-radius:12px;", height=64)
+        self.print_btn.hide()
         self.manual = QLineEdit()
         self.manual.setPlaceholderText("number …")
         self.manual.setMinimumHeight(TOUCH)
@@ -353,6 +356,7 @@ class ResultCard(QFrame):
         self.manual.returnPressed.connect(self._manual)
         self.scan_btn.clicked.connect(self.scan_requested.emit)
         self.scan_btn_left.clicked.connect(self.scan_requested.emit)
+        self.print_btn.clicked.connect(self.print_requested.emit)
         self.lookup = None          # callable number -> (in_list, description, nearest[list of Item])
         self.set_idle()
 
@@ -368,6 +372,8 @@ class ResultCard(QFrame):
     def _controls(self, scan: bool, ok: bool, fix: bool, discard: bool, pad: bool) -> None:
         for b in (self.scan_btn, self.scan_btn_left):
             b.setVisible(scan and self.scan_enabled)
+        if not scan:
+            self.print_btn.hide()                   # only offered while idle, right after a confirm
         self.ok_btn.setVisible(ok)
         self.fix_btn.setVisible(fix)
         self.discard_btn.setVisible(discard)
@@ -724,6 +730,7 @@ class OperatorPicker(TextPicker):
 class HistoryStrip(QWidget):
     delete_requested = Signal(int)
     relocate_requested = Signal(int)
+    print_requested = Signal(int)                  # "Print QR label" for a scan in the strip
     undo_last_requested = Signal()                 # the "Undo last scan" button
 
     def __init__(self, parent=None):
@@ -760,8 +767,11 @@ class HistoryStrip(QWidget):
         m.setStyleSheet("QMenu{font-size:17px;} QMenu::item{padding:14px 28px;}")
         a1 = m.addAction("Delete this scan")
         a2 = m.addAction("Change location …")
+        a3 = m.addAction("Print QR label")
         act = m.exec(btn.mapToGlobal(btn.rect().topLeft()))
         if act == a1:
             self.delete_requested.emit(sid)
         elif act == a2:
             self.relocate_requested.emit(sid)
+        elif act == a3:
+            self.print_requested.emit(sid)

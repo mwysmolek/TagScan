@@ -64,6 +64,16 @@ class Profile:
     # box content holds still, and scan the whole picture for codes all the time.
     scan_trigger: str = "tap"
     trigger_window: float = 3.0       # extended by 1.5 s whenever a first text vote lands
+    # QR labels for items that have none, printed on a label printer through its driver:
+    # "ask" offers a Print button after an OCR or typed confirm, "auto" prints at once, "off" hides it
+    print_labels: str = "ask"
+    label_printer: str = "Brother PT"       # part of the printer's name as Windows shows it
+    label_tape_mm: float = 24.0
+    label_length_mm: float = 60.0
+    label_dpi: int = 180
+    label_brand_line: str = "ACME"          # printed above the number and in the QR payload
+    label_keyword_line: str = "ASSET NO."
+    label_qr_template: str = "{brand}\n{keyword}\n{number}\n{description}"   # must match code_number_regex
 
     @classmethod
     def from_dict(cls, d: dict) -> "Profile":
